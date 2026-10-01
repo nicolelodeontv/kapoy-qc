@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      1.9
-// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, assigned counter per DA, assigned history (30 days), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts
+// @version      2.1
+// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, editable DA names (in the panel), assigned counter per DA, total assigned (today + all-time), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts
 // @match        https://mbo.minted.com/mbo/proofs?action=filter*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @downloadURL  https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -18,7 +18,8 @@
     // CONFIG
     // ============================================================
 
-    // Add/remove DA names ONLY here.
+    // STARTING list of DA names, used only until you edit the names in the
+    // panel (DA NAMES > Edit). After that, the list saved in the browser is used.
     const ALLOWED_DAS = [
         'Edzmer Amarani',
         'Jannel Tatoy',
@@ -48,10 +49,6 @@
     // true = notifications stay until dismissed. false = they auto-dismiss.
     const NOTIFICATION_STAYS_UNTIL_DISMISSED = true;
 
-    // How many days of assigned history to keep (per-day lists).
-    // The all-time totals per DA are never deleted.
-    const HISTORY_DAYS = 30;
-
     // true = play a short beep when a new proof appears (along with the
     // desktop notification). Browsers only allow sound after you have
     // clicked or pressed a key on the page once, so click anywhere after
@@ -79,7 +76,11 @@
     const RELOAD_KEY = 'Qchonon_Reload_Seconds';
     const AUTO_KEY = 'Qchonon_Auto_Reload';
     const ASSIGNED_KEY = 'Qchonon_Assigned_Today';
-    const HISTORY_KEY = 'Qchonon_Assigned_History';
+    const ALLTIME_KEY = 'Qchonon_Assigned_AllTime';
+    const DAS_KEY = 'Qchonon_DA_Names';
+    // Old history storage (removed in v2.0). Only used once to carry the
+    // old all-time total over, then it is deleted.
+    const OLD_HISTORY_KEY = 'Qchonon_Assigned_History';
 
     // Message and color by workload. "max: Infinity" means no upper limit.
     // color = light theme, darkColor = dark theme.
@@ -415,83 +416,25 @@ html:root #resultTable tbody td a.q-assign:hover {
 #qchonon-panel button.q-btn:hover { color: var(--q-text); border-color: var(--q-muted); }
 #qchonon-panel button.q-btn.q-danger:hover { color: #ef5350; border-color: #ef5350; }
 
-/* ---------- HISTORY WINDOW ---------- */
-#qchonon-panel .q-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 1000000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0,0,0,0.5);
-}
-#qchonon-panel .q-overlay[hidden] { display: none; }
-#qchonon-panel .q-modal {
-    width: min(540px, 92vw);
-    max-height: 82vh;
-    display: flex;
-    flex-direction: column;
-    background: var(--q-bg);
+#qchonon-panel [hidden] { display: none !important; }
+#qchonon-panel button.q-mini { margin-left: 6px; padding: 0 7px; font-size: 10px; letter-spacing: 0; }
+#qchonon-panel button.q-save { color: var(--q-green); border-color: var(--q-green); }
+#qchonon-panel textarea {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 6px 8px;
+    background: var(--q-input-bg);
     color: var(--q-text);
-    border: 1px solid var(--q-border);
-    border-radius: 10px;
-    box-shadow: 0 12px 40px var(--q-shadow);
-    overflow: hidden;
+    border: 1px solid var(--q-input-border);
+    border-radius: 5px;
+    font-family: inherit;
     font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
 }
-#qchonon-panel .q-modal-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 10px 14px;
-    background: var(--q-head);
-    border-bottom: 1px solid var(--q-border);
-    font-size: 14px;
-    font-weight: 700;
-}
-#qchonon-panel .q-modal-body { flex: 1; padding: 12px 14px; overflow: auto; }
-#qchonon-panel .q-modal-foot {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 14px;
-    border-top: 1px solid var(--q-border);
-    color: var(--q-muted);
-    font-size: 11px;
-}
-#qchonon-panel .q-hsec { margin-bottom: 14px; }
-#qchonon-panel .q-hline {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 4px 0;
-    border-bottom: 1px solid var(--q-row);
-}
-#qchonon-panel .q-hline:last-child { border-bottom: none; }
-#qchonon-panel .q-hday-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 4px;
-    padding-bottom: 4px;
-    border-bottom: 1px solid var(--q-border);
-    font-weight: 700;
-}
-#qchonon-panel .q-hda { padding: 4px 0; }
-#qchonon-panel .q-hda-name { display: flex; justify-content: space-between; align-items: center; }
-#qchonon-panel .q-proofs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-#qchonon-panel .q-proof {
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: var(--q-row);
-    color: var(--q-text);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-}
-#qchonon-panel .q-proof .q-time { margin-left: 4px; color: var(--q-muted); font-size: 10px; }
-#qchonon-panel .q-empty { padding: 18px 0; color: var(--q-muted); text-align: center; }
-#qchonon-panel .q-note { color: var(--q-muted); font-size: 11px; }
+#qchonon-panel textarea:focus { outline: none; border-color: var(--q-amber); }
+#qchonon-panel .q-note { margin: 4px 0 6px; color: var(--q-muted); font-size: 10px; }
+#qchonon-panel .q-editor-btns { justify-content: flex-end; width: 100%; }
 
 #qchonon-panel input,
 #qchonon-panel button { font-family: inherit; }
@@ -782,14 +725,55 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // HELPERS
     // ============================================================
 
-    // lowercase name -> name exactly as written in ALLOWED_DAS
-    const allowedLower = new Map(
-        ALLOWED_DAS.map((name) => [name.trim().toLowerCase(), name])
-    );
-
     function normalize(text) {
         return String(text || '').replace(/\s+/g, ' ').trim();
     }
+
+    // Cleans a list of names: trims, drops empty ones and duplicates (any case).
+    function cleanNames(list) {
+        const seen = new Set();
+        const out = [];
+
+        list.forEach((raw) => {
+            const name = normalize(raw);
+            const key = name.toLowerCase();
+
+            if (name && !seen.has(key)) {
+                seen.add(key);
+                out.push(name);
+            }
+        });
+
+        return out;
+    }
+
+    // DA names: the list saved from the panel, or the starting list above.
+    function loadDANames() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(DAS_KEY));
+
+            if (Array.isArray(parsed)) {
+                const clean = cleanNames(parsed);
+
+                if (clean.length) {
+                    return clean;
+                }
+            }
+        } catch (error) {
+            // fall through to the starting list
+        }
+
+        return cleanNames(ALLOWED_DAS);
+    }
+
+    let currentDAs = loadDANames();
+
+    // lowercase name -> name exactly as saved
+    function buildAllowedMap() {
+        return new Map(currentDAs.map((name) => [name.toLowerCase(), name]));
+    }
+
+    let allowedLower = buildAllowedMap();
 
     function cellText($row, column) {
         return normalize($row.children(`td:nth-child(${column})`).text());
@@ -847,12 +831,16 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     // ============================================================
-    // ASSIGNED HISTORY (previous days, kept for HISTORY_DAYS days)
+    // ASSIGNED TRACKER (+1 on the DA when you click "assign to me")
     // ============================================================
-    // Shape: { since: 'YYYY-MM-DD',
-    //          totals: { 'DA name': number },            (never deleted)
-    //          days:   { 'YYYY-MM-DD': { 'DA name': [ { id, t } ] } } }
-    // t = time of the click (ms). t = 0 means the time is unknown.
+    // TODAY: saved per day and per proof ID, so clicking the same proof
+    // twice counts once, and the numbers start fresh every new day.
+    // The "Reset" button sets today's numbers back to 0.
+    //
+    // ALL-TIME: one running number that goes up by 1 for every newly
+    // counted proof. It survives the daily reset and the Reset button.
+    // Only "Clear all" sets it back to 0.
+    // Shape: { since: 'YYYY-MM-DD', count: number }
 
     function dateKeyFrom(d) {
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -861,104 +849,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     function todayKey() {
         return dateKeyFrom(new Date());
     }
-
-    function oldestKeptKey() {
-        const d = new Date();
-
-        d.setDate(d.getDate() - (HISTORY_DAYS - 1));
-
-        return dateKeyFrom(d);
-    }
-
-    function loadHistory() {
-        let h = null;
-
-        try {
-            h = JSON.parse(localStorage.getItem(HISTORY_KEY));
-        } catch (error) {
-            h = null;
-        }
-
-        if (!h || typeof h !== 'object') {
-            h = {};
-        }
-
-        if (!h.totals || typeof h.totals !== 'object') {
-            h.totals = {};
-        }
-
-        if (!h.days || typeof h.days !== 'object') {
-            h.days = {};
-        }
-
-        if (!h.since) {
-            h.since = todayKey();
-        }
-
-        return h;
-    }
-
-    function saveHistory(h) {
-        // Drop per-day lists older than HISTORY_DAYS (the totals stay).
-        const cutoff = oldestKeptKey();
-
-        Object.keys(h.days).forEach((date) => {
-            if (date < cutoff) {
-                delete h.days[date];
-            }
-        });
-
-        writeStorage(HISTORY_KEY, JSON.stringify(h));
-    }
-
-    // Adds one proof to a day. Returns true if it was new (so it counts once).
-    function addToHistory(h, date, daName, proofID, time) {
-        if (date < oldestKeptKey()) {
-            return false;
-        }
-
-        const day = h.days[date] || (h.days[date] = {});
-        const list = day[daName] || (day[daName] = []);
-
-        if (list.some((entry) => entry.id === proofID)) {
-            return false;
-        }
-
-        list.push({ id: proofID, t: time || 0 });
-        h.totals[daName] = (h.totals[daName] || 0) + 1;
-
-        return true;
-    }
-
-    // Copies a { DA: [proofIDs] } record (the daily counter) into the history.
-    // Safe to run many times: proofs already there are skipped.
-    function mergeDayIntoHistory(date, byDA) {
-        if (!date || !byDA || typeof byDA !== 'object') {
-            return;
-        }
-
-        const h = loadHistory();
-        let changed = false;
-
-        Object.keys(byDA).forEach((daName) => {
-            (byDA[daName] || []).forEach((proofID) => {
-                if (addToHistory(h, date, daName, String(proofID), 0)) {
-                    changed = true;
-                }
-            });
-        });
-
-        if (changed) {
-            saveHistory(h);
-        }
-    }
-
-    // ============================================================
-    // ASSIGNED TRACKER (+1 on the DA when you click "assign to me")
-    // ============================================================
-    // Saved per day and per proof ID, so clicking the same proof twice
-    // counts once, and the numbers start fresh every new day.
-    // Every click is also written to the history above.
 
     function loadAssigned() {
         try {
@@ -969,9 +859,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                     return parsed;
                 }
 
-                // A new day started: keep yesterday's numbers in the history.
-                mergeDayIntoHistory(parsed.date, parsed.byDA);
-
+                // A new day started: today's numbers start from 0.
                 const fresh = { date: todayKey(), byDA: {} };
 
                 writeStorage(ASSIGNED_KEY, JSON.stringify(fresh));
@@ -995,6 +883,80 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return (assigned.byDA[name] || []).length;
     }
 
+    function assignedTodayTotal() {
+        return Object.keys(assigned.byDA)
+            .reduce((sum, name) => sum + (assigned.byDA[name] || []).length, 0);
+    }
+
+    function loadAllTime() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(ALLTIME_KEY));
+
+            if (parsed && typeof parsed.count === 'number') {
+                return parsed;
+            }
+        } catch (error) {
+            // fall through
+        }
+
+        return null;
+    }
+
+    function saveAllTime(data) {
+        writeStorage(ALLTIME_KEY, JSON.stringify(data));
+    }
+
+    // Runs once at startup. First time on v2.0 it carries the old history
+    // total over (so the all-time number does not drop to 0), then deletes
+    // the old history data.
+    function initAllTime() {
+        if (!loadAllTime()) {
+            let count = 0;
+            let since = todayKey();
+
+            try {
+                const old = JSON.parse(localStorage.getItem(OLD_HISTORY_KEY));
+
+                if (old && old.totals && typeof old.totals === 'object') {
+                    count = Object.keys(old.totals)
+                        .reduce((sum, name) => sum + (Number(old.totals[name]) || 0), 0);
+
+                    if (old.since) {
+                        since = old.since;
+                    }
+                }
+            } catch (error) {
+                // no old history, start from 0
+            }
+
+            if (!count) {
+                count = assignedTodayTotal();
+            }
+
+            saveAllTime({ since: since, count: count });
+        }
+
+        try {
+            localStorage.removeItem(OLD_HISTORY_KEY);
+        } catch (error) {
+            // ignore
+        }
+    }
+
+    function formatSince(key) {
+        const parts = String(key || '').split('-').map(Number);
+
+        if (parts.length !== 3 || parts.some(Number.isNaN)) {
+            return '';
+        }
+
+        return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString([], {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric'
+        });
+    }
+
     function renderAssigned() {
         document.querySelectorAll('#qchonon-panel .q-assigned').forEach((el) => {
             const n = assignedCount(el.dataset.da);
@@ -1002,6 +964,23 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             el.textContent = n;
             el.classList.toggle('zero', n === 0);
         });
+
+        const todayTotal = assignedTodayTotal();
+        const todayEl = document.getElementById('q-total-today');
+
+        if (todayEl) {
+            todayEl.textContent = todayTotal;
+            todayEl.classList.toggle('zero', todayTotal === 0);
+        }
+
+        const allTime = loadAllTime() || { since: todayKey(), count: 0 };
+        const allEl = document.getElementById('q-total-all');
+
+        if (allEl) {
+            allEl.textContent = allTime.count;
+            allEl.classList.toggle('zero', allTime.count === 0);
+            allEl.title = `All-time total since ${formatSince(allTime.since)}`;
+        }
     }
 
     function trackAssign($link) {
@@ -1025,14 +1004,14 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         list.push(proofID);
 
         saveAssigned();
+
+        // New proof counted today: add it to the all-time total too.
+        const allTime = loadAllTime() || { since: todayKey(), count: 0 };
+
+        allTime.count++;
+        saveAllTime(allTime);
+
         renderAssigned();
-
-        // Also log it in the history, with the time of the click.
-        const h = loadHistory();
-
-        if (addToHistory(h, assigned.date, daName, proofID, Date.now())) {
-            saveHistory(h);
-        }
     }
 
     function setupAssignTracking() {
@@ -1047,10 +1026,9 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function setupAssignedReset() {
-        const button = document.getElementById('q-reset-assigned');
-
-        button.addEventListener('click', function () {
-            if (!window.confirm("Reset today's assigned counts to 0?\n(The history is kept.)")) {
+        // Reset = today's numbers only. The all-time total stays.
+        document.getElementById('q-reset-assigned').addEventListener('click', function () {
+            if (!window.confirm("Reset today's assigned counts to 0?\n(The all-time total is kept.)")) {
                 return;
             }
 
@@ -1059,252 +1037,18 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             saveAssigned();
             renderAssigned();
         });
-    }
 
-    // ============================================================
-    // HISTORY WINDOW (view, copy, export, clear)
-    // ============================================================
-
-    let historyOpen = false;
-
-    function formatClock(ms) {
-        return ms
-            ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            : '';
-    }
-
-    function formatDay(key) {
-        const parts = key.split('-').map(Number);
-        const d = new Date(parts[0], parts[1] - 1, parts[2]);
-        const label = d.toLocaleDateString([], {
-            weekday: 'short',
-            month: 'short',
-            day: 'numeric'
-        });
-
-        if (key === todayKey()) {
-            return `Today · ${label}`;
-        }
-
-        return label;
-    }
-
-    function dayTotal(day) {
-        return Object.keys(day).reduce((sum, name) => sum + day[name].length, 0);
-    }
-
-    function renderHistory() {
-        const body = document.getElementById('q-history-body');
-        const note = document.getElementById('q-history-note');
-        const h = loadHistory();
-        const dates = Object.keys(h.days)
-            .filter((date) => dayTotal(h.days[date]) > 0)
-            .sort()
-            .reverse();
-
-        // DAs from the config first, then any others that appear in the data.
-        const names = ALLOWED_DAS.slice();
-
-        Object.keys(h.totals).forEach((name) => {
-            if (!names.includes(name)) {
-                names.push(name);
-            }
-        });
-
-        const grand = names.reduce((sum, name) => sum + (h.totals[name] || 0), 0);
-
-        let html = '';
-
-        html += `
-            <div class="q-hsec">
-                <div class="q-label q-label-row">
-                    <span>ALL-TIME TOTAL</span>
-                    <span>SINCE ${escapeHtml(formatDay(h.since).replace('Today · ', ''))}</span>
-                </div>
-                ${names.map((name) => `
-                    <div class="q-hline">
-                        <span>${escapeHtml(name)}</span>
-                        <span class="q-count q-tot ${h.totals[name] ? '' : 'zero'}">${h.totals[name] || 0}</span>
-                    </div>
-                `).join('')}
-                <div class="q-hline">
-                    <strong>Total</strong>
-                    <span class="q-count q-tot ${grand ? '' : 'zero'}">${grand}</span>
-                </div>
-            </div>
-        `;
-
-        if (!dates.length) {
-            html += '<div class="q-empty">No assigned proofs recorded yet.</div>';
-        }
-
-        dates.forEach((date) => {
-            const day = h.days[date];
-
-            html += `
-                <div class="q-hsec">
-                    <div class="q-hday-head">
-                        <span>${escapeHtml(formatDay(date))}</span>
-                        <span class="q-count q-tot">${dayTotal(day)}</span>
-                    </div>
-                    ${names.filter((name) => day[name] && day[name].length).map((name) => `
-                        <div class="q-hda">
-                            <div class="q-hda-name">
-                                <span>${escapeHtml(name)}</span>
-                                <span class="q-count q-tot">${day[name].length}</span>
-                            </div>
-                            <div class="q-proofs">
-                                ${day[name].map((entry) => `
-                                    <span class="q-proof">${escapeHtml(entry.id)}${entry.t ? `<span class="q-time">${escapeHtml(formatClock(entry.t))}</span>` : ''}</span>
-                                `).join('')}
-                            </div>
-                        </div>
-                    `).join('')}
-                </div>
-            `;
-        });
-
-        body.innerHTML = html;
-        note.textContent = `Daily lists: last ${HISTORY_DAYS} days`;
-    }
-
-    function historyToCsv() {
-        const h = loadHistory();
-        const rows = [['Date', 'Time', 'DA', 'Proof ID']];
-        const flat = [];
-
-        Object.keys(h.days).forEach((date) => {
-            Object.keys(h.days[date]).forEach((name) => {
-                h.days[date][name].forEach((entry) => {
-                    flat.push({ date: date, t: entry.t, name: name, id: entry.id });
-                });
-            });
-        });
-
-        flat.sort((a, b) => (a.date === b.date ? b.t - a.t : a.date < b.date ? 1 : -1));
-
-        flat.forEach((item) => {
-            rows.push([
-                item.date,
-                item.t ? new Date(item.t).toLocaleTimeString([], { hour12: false }) : '',
-                item.name,
-                item.id
-            ]);
-        });
-
-        return rows
-            .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
-            .join('\r\n');
-    }
-
-    function flashLabel(button, text) {
-        const original = button.dataset.label || button.textContent;
-
-        button.dataset.label = original;
-        button.textContent = text;
-
-        setTimeout(function () {
-            button.textContent = original;
-        }, 1500);
-    }
-
-    function copyText(text) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            return navigator.clipboard.writeText(text);
-        }
-
-        return new Promise(function (resolve, reject) {
-            const box = document.createElement('textarea');
-
-            box.value = text;
-            box.style.position = 'fixed';
-            box.style.opacity = '0';
-            document.body.appendChild(box);
-            box.select();
-
-            try {
-                document.execCommand('copy') ? resolve() : reject(new Error('copy failed'));
-            } catch (error) {
-                reject(error);
-            } finally {
-                box.remove();
-            }
-        });
-    }
-
-    function openHistory() {
-        renderHistory();
-
-        document.getElementById('q-history').hidden = false;
-        historyOpen = true;
-    }
-
-    function closeHistory() {
-        document.getElementById('q-history').hidden = true;
-        historyOpen = false;
-    }
-
-    function setupHistory() {
-        const overlay = document.getElementById('q-history');
-
-        document.getElementById('q-open-history').addEventListener('click', openHistory);
-        document.getElementById('q-history-close').addEventListener('click', closeHistory);
-
-        // Click on the dark area outside the window closes it.
-        overlay.addEventListener('mousedown', function (event) {
-            if (event.target === overlay) {
-                closeHistory();
-            }
-        });
-
-        document.addEventListener('keydown', function (event) {
-            if (event.key === 'Escape' && historyOpen) {
-                closeHistory();
-            }
-        });
-
-        document.getElementById('q-history-copy').addEventListener('click', function () {
-            const button = this;
-
-            copyText(historyToCsv()).then(
-                function () { flashLabel(button, 'Copied!'); },
-                function () { flashLabel(button, 'Failed'); }
-            );
-        });
-
-        document.getElementById('q-history-export').addEventListener('click', function () {
-            const blob = new Blob(['\ufeff' + historyToCsv()], { type: 'text/csv;charset=utf-8' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-
-            link.href = url;
-            link.download = `kapoy-qc-history-${todayKey()}.csv`;
-            link.style.display = 'none';
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-
-            setTimeout(function () {
-                URL.revokeObjectURL(url);
-            }, 1000);
-        });
-
-        document.getElementById('q-history-clear').addEventListener('click', function () {
-            if (!window.confirm("Clear the whole assigned history?\nThis also resets today's counts to 0.")) {
+        // Clear all = today's numbers AND the all-time total.
+        document.getElementById('q-clear-all').addEventListener('click', function () {
+            if (!window.confirm("Clear everything?\nThis sets today's counts AND the all-time total to 0.")) {
                 return;
             }
-
-            writeStorage(HISTORY_KEY, JSON.stringify({
-                since: todayKey(),
-                totals: {},
-                days: {}
-            }));
 
             assigned = { date: todayKey(), byDA: {} };
 
             saveAssigned();
+            saveAllTime({ since: todayKey(), count: 0 });
             renderAssigned();
-            renderHistory();
         });
     }
 
@@ -1558,7 +1302,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     function getDACounts() {
         const counts = {};
 
-        ALLOWED_DAS.forEach((name) => {
+        currentDAs.forEach((name) => {
             counts[name] = 0;
         });
 
@@ -1603,6 +1347,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // Countdown state (shared so the interval box can reset it).
     let remaining = reloadSeconds;
     let intervalEditing = false;
+    let namesEditing = false;
 
     function createPanel() {
         if (document.getElementById('qchonon-panel')) {
@@ -1651,43 +1396,67 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 <div class="q-divider"></div>
 
                 <div class="q-label q-label-row">
-                    <span>DA NAMES</span>
+                    <span>DA NAMES <button type="button" class="q-btn q-mini" id="q-edit-names" title="Add, remove or rename DAs">Edit</button></span>
                     <span>SHOWING · ASSIGNED</span>
                 </div>
                 <div id="q-das"></div>
-                <div class="q-foot">
-                    <span>Resets daily</span>
-                    <span class="q-foot-btns">
-                        <button type="button" class="q-btn" id="q-open-history">History</button>
-                        <button type="button" class="q-btn" id="q-reset-assigned">Reset</button>
+                <div id="q-names-editor" hidden>
+                    <textarea id="q-names-text" rows="4" spellcheck="false" placeholder="One name per line"></textarea>
+                    <div class="q-note">One name per line, spelled exactly like the DA column in the table.</div>
+                    <div class="q-foot-btns q-editor-btns">
+                        <button type="button" class="q-btn" id="q-names-cancel">Cancel</button>
+                        <button type="button" class="q-btn q-save" id="q-names-save">Save</button>
+                    </div>
+                </div>
+
+                <div class="q-divider"></div>
+                <div class="q-label q-label-row">
+                    <span>TOTAL ASSIGNED</span>
+                    <span>TODAY · ALL-TIME</span>
+                </div>
+                <div class="q-da">
+                    <strong>Total</strong>
+                    <span class="q-chips">
+                        <span class="q-count q-tot zero" id="q-total-today" title="Total assigned to me today">0</span>
+                        <span class="q-count q-tot zero" id="q-total-all" title="All-time total">0</span>
                     </span>
                 </div>
-            </div>
 
-            <div class="q-overlay" id="q-history" hidden>
-                <div class="q-modal">
-                    <div class="q-modal-head">
-                        <span>Assigned history</span>
-                        <button type="button" class="q-btn" id="q-history-close" title="Close">✕</button>
-                    </div>
-                    <div class="q-modal-body" id="q-history-body"></div>
-                    <div class="q-modal-foot">
-                        <span class="q-note" id="q-history-note"></span>
-                        <span class="q-foot-btns">
-                            <button type="button" class="q-btn" id="q-history-copy">Copy</button>
-                            <button type="button" class="q-btn" id="q-history-export">Export</button>
-                            <button type="button" class="q-btn q-danger" id="q-history-clear">Clear</button>
-                        </span>
-                    </div>
+                <div class="q-foot">
+                    <span>Today resets daily</span>
+                    <span class="q-foot-btns">
+                        <button type="button" class="q-btn" id="q-reset-assigned" title="Reset today's counts (all-time total is kept)">Reset</button>
+                        <button type="button" class="q-btn q-danger" id="q-clear-all" title="Reset today's counts AND the all-time total">Clear all</button>
+                    </span>
                 </div>
             </div>
         `;
 
         document.body.appendChild(panel);
 
+        renderDAList();
+
+        document.getElementById('q-last').textContent =
+            `Last check: ${formatTime(new Date())}`;
+
+        setupThemeSwitch();
+        setupCollapse(panel);
+        setupIntervalInput();
+        setupAutoToggle();
+        setupAssignedReset();
+        setupNamesEditor();
+        renderAssigned();
+
+        applyTheme();
+        restorePanelPosition(panel);
+        makePanelDraggable(panel);
+    }
+
+    // Draws the DA rows (name + showing + assigned) from the current list.
+    function renderDAList() {
         const counts = getDACounts();
 
-        document.getElementById('q-das').innerHTML = ALLOWED_DAS
+        document.getElementById('q-das').innerHTML = currentDAs
             .map((name) => `
                 <div class="q-da">
                     <span>${escapeHtml(name)}</span>
@@ -1699,20 +1468,74 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             `)
             .join('');
 
-        document.getElementById('q-last').textContent =
-            `Last check: ${formatTime(new Date())}`;
-
-        setupThemeSwitch();
-        setupCollapse(panel);
-        setupIntervalInput();
-        setupAutoToggle();
-        setupAssignedReset();
-        setupHistory();
         renderAssigned();
+    }
 
-        applyTheme();
-        restorePanelPosition(panel);
-        makePanelDraggable(panel);
+    // Edit the DA names from the panel (saved in the browser).
+    function setupNamesEditor() {
+        const editBtn = document.getElementById('q-edit-names');
+        const editor = document.getElementById('q-names-editor');
+        const list = document.getElementById('q-das');
+        const text = document.getElementById('q-names-text');
+
+        function open() {
+            text.value = currentDAs.join('\n');
+            list.hidden = true;
+            editor.hidden = false;
+            namesEditing = true;
+            editBtn.textContent = 'Close';
+            text.focus();
+        }
+
+        function close() {
+            editor.hidden = true;
+            list.hidden = false;
+            namesEditing = false;
+            editBtn.textContent = 'Edit';
+        }
+
+        function save() {
+            const names = cleanNames(text.value.split(/\r?\n/));
+
+            if (!names.length) {
+                window.alert('Add at least one DA name.');
+                return;
+            }
+
+            currentDAs = names;
+            allowedLower = buildAllowedMap();
+            writeStorage(DAS_KEY, JSON.stringify(names));
+
+            // Proofs of newly added DAs that are already on the page should not
+            // fire "new proof" notifications, so mark them as seen first.
+            const now = Date.now();
+
+            collectProofs($('#resultTable tbody tr')).forEach((proof) => {
+                if (!seenProofs[proof.proofID]) {
+                    seenProofs[proof.proofID] = now;
+                }
+            });
+
+            saveSeen();
+
+            filterRows();
+            updateCount();
+            renderDAList();
+            close();
+        }
+
+        editBtn.addEventListener('click', function () {
+            namesEditing ? close() : open();
+        });
+
+        document.getElementById('q-names-cancel').addEventListener('click', close);
+        document.getElementById('q-names-save').addEventListener('click', save);
+
+        text.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') {
+                close();
+            }
+        });
     }
 
     function setupThemeSwitch() {
@@ -2040,11 +1863,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             } else if (panelDragging) {
                 label.textContent = 'Paused (moving)';
                 label.className = 'paused';
-            } else if (intervalEditing) {
+            } else if (intervalEditing || namesEditing) {
                 label.textContent = 'Paused (editing)';
-                label.className = 'paused';
-            } else if (historyOpen) {
-                label.textContent = 'Paused (history)';
                 label.className = 'paused';
             } else if (isSelectionActive()) {
                 label.textContent = 'Paused (selected)';
@@ -2058,8 +1878,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         render();
 
         setInterval(function () {
-            if (!autoReload || panelDragging || intervalEditing || historyOpen || isSelectionActive()) {
-                // Keep the countdown at full while off, dragging, editing, viewing history or selecting.
+            if (!autoReload || panelDragging || intervalEditing || namesEditing || isSelectionActive()) {
+                // Keep the countdown at full while off, dragging, editing or selecting.
                 remaining = reloadSeconds;
                 render();
                 return;
@@ -2101,11 +1921,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             }
         }
 
-        // Make sure today's counted proofs (including ones counted before
-        // the history existed) are in the history. Safe to repeat.
-        safe('history sync', function () {
-            mergeDayIntoHistory(assigned.date, assigned.byDA);
-        });
+        // Sets up the all-time total (carries over the old history total once).
+        safe('all-time total', initAllTime);
 
         safe('filter rows', filterRows);
 
