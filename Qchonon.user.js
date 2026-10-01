@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      1.7
-// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, assigned counter per DA, assigned history (30 days), background refresh (no page reload), new-proof beep, better fonts
+// @version      1.9
+// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, assigned counter per DA, assigned history (30 days), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts
 // @match        https://mbo.minted.com/mbo/proofs?action=filter*
+// @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
+// @downloadURL  https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @grant        none
 // @run-at       document-start
 // @require      https://code.jquery.com/jquery-3.7.1.min.js
@@ -75,6 +77,7 @@
     const THEME_KEY = 'Qchonon_Theme';
     const COLLAPSED_KEY = 'Qchonon_Panel_Collapsed';
     const RELOAD_KEY = 'Qchonon_Reload_Seconds';
+    const AUTO_KEY = 'Qchonon_Auto_Reload';
     const ASSIGNED_KEY = 'Qchonon_Assigned_Today';
     const HISTORY_KEY = 'Qchonon_Assigned_History';
 
@@ -146,6 +149,9 @@
     let reloadSeconds = readStorage(RELOAD_KEY)
         ? clampSeconds(readStorage(RELOAD_KEY))
         : DEFAULT_RELOAD_SECONDS;
+
+    // Auto-reload on or off (switch in the panel). On by default. Saved between reloads.
+    let autoReload = readStorage(AUTO_KEY) !== 'off';
 
     // Panel hidden (collapsed to its title bar) or shown. Saved between reloads.
     let collapsed = readStorage(COLLAPSED_KEY) === 'yes';
@@ -1622,6 +1628,13 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
                 <div class="q-label">RELOAD</div>
                 <div class="q-row">
+                    <span>Auto-reload: <strong id="q-auto-label"></strong></span>
+                    <label class="q-switch" title="Turn auto-reload on / off">
+                        <input type="checkbox" id="q-auto">
+                        <span class="q-slider"></span>
+                    </label>
+                </div>
+                <div class="q-row">
                     <span>Every</span>
                     <span class="q-interval">
                         <input class="q-number" id="q-interval" type="number"
@@ -1692,6 +1705,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         setupThemeSwitch();
         setupCollapse(panel);
         setupIntervalInput();
+        setupAutoToggle();
         setupAssignedReset();
         setupHistory();
         renderAssigned();
@@ -1743,6 +1757,29 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         });
 
         applyCollapsed(panel);
+    }
+
+    function setupAutoToggle() {
+        const toggle = document.getElementById('q-auto');
+        const label = document.getElementById('q-auto-label');
+
+        function show() {
+            toggle.checked = autoReload;
+            label.textContent = autoReload ? 'On' : 'Off';
+        }
+
+        toggle.addEventListener('change', function () {
+            autoReload = toggle.checked;
+
+            writeStorage(AUTO_KEY, autoReload ? 'on' : 'off');
+
+            // Start a fresh countdown when it is turned back on.
+            remaining = reloadSeconds;
+
+            show();
+        });
+
+        show();
     }
 
     function setupIntervalInput() {
@@ -1997,7 +2034,10 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 return;
             }
 
-            if (panelDragging) {
+            if (!autoReload) {
+                label.textContent = 'Off';
+                label.className = 'paused';
+            } else if (panelDragging) {
                 label.textContent = 'Paused (moving)';
                 label.className = 'paused';
             } else if (intervalEditing) {
@@ -2018,8 +2058,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         render();
 
         setInterval(function () {
-            if (panelDragging || intervalEditing || historyOpen || isSelectionActive()) {
-                // Keep the countdown at full while dragging, editing, viewing history or selecting.
+            if (!autoReload || panelDragging || intervalEditing || historyOpen || isSelectionActive()) {
+                // Keep the countdown at full while off, dragging, editing, viewing history or selecting.
                 remaining = reloadSeconds;
                 render();
                 return;
