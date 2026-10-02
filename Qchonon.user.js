@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      2.1
-// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, editable DA names (in the panel), assigned counter per DA, total assigned (today + all-time), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts
+// @version      2.8
+// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, editable DA names (in the panel), Standard / Wedding queue tracker, assigned counter per DA, total assigned (today + all-time), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts, color-coded DAs and queues, grouped notifications, Settings section, single total
 // @match        https://mbo.minted.com/mbo/proofs?action=filter*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @downloadURL  https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -33,6 +33,32 @@
     const COL_STATE = 13;
     const DA_COLUMNS = [15, 16];
 
+    // Queue types to track (showing + assigned today). A proof belongs to a
+    // type when its Queue cell (column 7) contains that word, any capitals.
+    const QUEUE_TYPES = ['Standard', 'Wedding'];
+
+    // Colors that tell the DAs apart. They are given out in the order of the
+    // DA list (first DA = first color, and so on; it repeats if you add more DAs
+    // than there are colors). Change the hex values freely.
+    // The DA names themselves stay in the normal text color (white in dark theme).
+    const DA_COLORS = [
+        '#4f8cff', // blue
+        '#ff7043', // orange
+        '#ab47bc', // purple
+        '#26a69a', // teal
+        '#ec407a', // pink
+        '#9ccc65', // lime
+        '#ffca28', // yellow
+        '#8d6e63'  // brown
+    ];
+
+    // Colors for the queue types (Queue column + panel rows).
+    const QUEUE_COLORS = {
+        Standard: '#42a5f5',
+        Wedding: '#f06292'
+    };
+    const QUEUE_FALLBACK_COLOR = '#9e9e9e';
+
     // Reload interval is now changed in the panel. This is only the
     // starting value used the very first time (it is saved afterwards).
     const DEFAULT_RELOAD_SECONDS = 10;
@@ -46,8 +72,16 @@
     // so you don't lose your selection mid-action.
     const SKIP_RELOAD_IF_CHECKED = true;
 
+    // New proofs are grouped into ONE popup per refresh (a summary per DA),
+    // and a newer popup replaces the previous one, so only one is ever on screen.
+    const NOTIFICATION_TAG = 'qchonon-new-proofs';
+
+    // Seconds before a popup closes by itself (only when
+    // NOTIFICATION_STAYS_UNTIL_DISMISSED is false).
+    const NOTIFICATION_SECONDS = 6;
+
     // true = notifications stay until dismissed. false = they auto-dismiss.
-    const NOTIFICATION_STAYS_UNTIL_DISMISSED = true;
+    const NOTIFICATION_STAYS_UNTIL_DISMISSED = false;
 
     // true = play a short beep when a new proof appears (along with the
     // desktop notification). Browsers only allow sound after you have
@@ -290,6 +324,21 @@ html:root #resultTable tbody td a.q-assign:hover {
     border-color: var(--ql-primary-hover) !important;
 }
 
+/* ---------- DA / QUEUE COLORS (DA names stay in the normal text color) ---------- */
+html:root #resultTable tbody tr.q-colored td:first-child {
+    box-shadow: inset 5px 0 0 var(--q-da);
+}
+html:root #resultTable tbody tr.q-colored td {
+    background-image: linear-gradient(0deg, color-mix(in srgb, var(--q-da) 10%, transparent), color-mix(in srgb, var(--q-da) 10%, transparent)) !important;
+}
+html:root #resultTable tbody tr.q-colored:hover td {
+    background-image: linear-gradient(0deg, color-mix(in srgb, var(--q-da) 20%, transparent), color-mix(in srgb, var(--q-da) 20%, transparent)) !important;
+}
+html:root #resultTable tbody td.q-queue-cell {
+    font-weight: 600;
+    color: var(--q-queue) !important;
+}
+
 /* ---------- PANEL ---------- */
 #qchonon-panel {
     --q-bg: #171717; --q-head: #202020; --q-text: #f5f5f5; --q-muted: #999;
@@ -300,7 +349,7 @@ html:root #resultTable tbody td a.q-assign:hover {
     position: fixed;
     top: 80px;
     right: 25px;
-    width: 250px;
+    width: 290px;
     z-index: 999999;
     background: var(--q-bg);
     color: var(--q-text);
@@ -332,7 +381,8 @@ html:root #resultTable tbody td a.q-assign:hover {
 }
 #qchonon-panel .q-grip { color: var(--q-muted); font-size: 18px; letter-spacing: -3px; }
 #qchonon-panel .q-tools { display: inline-flex; align-items: center; gap: 8px; }
-#qchonon-panel button#q-collapse {
+#qchonon-panel button#q-collapse,
+#qchonon-panel button#q-settings-btn {
     width: 22px;
     height: 22px;
     padding: 0;
@@ -344,7 +394,9 @@ html:root #resultTable tbody td a.q-assign:hover {
     line-height: 1;
     cursor: pointer;
 }
-#qchonon-panel button#q-collapse:hover { color: var(--q-text); border-color: var(--q-muted); }
+#qchonon-panel button#q-collapse:hover,
+#qchonon-panel button#q-settings-btn:hover { color: var(--q-text); border-color: var(--q-muted); }
+#qchonon-panel button#q-settings-btn.q-on { color: var(--q-text); border-color: var(--q-amber); }
 #qchonon-panel.q-collapsed .q-body { display: none; }
 #qchonon-panel.q-collapsed .q-head { border-bottom: none; }
 #qchonon-panel .q-body { padding: 10px 12px 12px; }
@@ -369,10 +421,37 @@ html:root #resultTable tbody td a.q-assign:hover {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 6px 0;
+    padding: 6px 0 6px 8px;
     border-bottom: 1px solid var(--q-row);
+    border-left: 3px solid var(--q-rowcolor, transparent);
 }
 #qchonon-panel .q-da:last-child { border-bottom: none; }
+/* Names and labels always stay on ONE line (long names get "...") */
+#qchonon-panel .q-da > span:first-child,
+#qchonon-panel .q-da > strong {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+#qchonon-panel .q-chips { flex: 0 0 auto; margin-left: 8px; }
+#qchonon-panel .q-label,
+#qchonon-panel .q-label-row span,
+#qchonon-panel .q-row,
+#qchonon-panel .q-last,
+#qchonon-panel .q-foot { white-space: nowrap; }
+/* Colored dot before each DA / queue name (the name text itself is unchanged) */
+#qchonon-panel .q-da > span:first-child::before,
+#qchonon-panel .q-da > strong::before {
+    content: '';
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 7px;
+    border-radius: 50%;
+    background: var(--q-rowcolor, transparent);
+}
 #qchonon-panel .q-count {
     min-width: 22px;
     padding: 2px 7px;
@@ -385,12 +464,22 @@ html:root #resultTable tbody td a.q-assign:hover {
 #qchonon-panel .q-count.zero { background: var(--q-chip-zero-bg); color: var(--q-chip-zero); }
 #qchonon-panel .q-chips { display: inline-flex; align-items: center; gap: 6px; }
 #qchonon-panel .q-count.q-assigned,
+#qchonon-panel .q-count.q-qassigned,
 #qchonon-panel .q-count.q-tot {
     background: color-mix(in srgb, var(--q-green) 18%, transparent);
     color: var(--q-green);
 }
 #qchonon-panel .q-count.q-assigned.zero,
+#qchonon-panel .q-count.q-qassigned.zero,
 #qchonon-panel .q-count.q-tot.zero { background: var(--q-chip-zero-bg); color: var(--q-chip-zero); }
+/* Counters take the color of their DA / queue (only when above 0) */
+#qchonon-panel .q-da .q-count.q-show:not(.zero),
+#qchonon-panel .q-da .q-count.q-assigned:not(.zero),
+#qchonon-panel .q-da .q-count.q-qshow:not(.zero),
+#qchonon-panel .q-da .q-count.q-qassigned:not(.zero) {
+    background: color-mix(in srgb, var(--q-rowcolor) 22%, transparent);
+    color: var(--q-rowcolor);
+}
 #qchonon-panel .q-label-row { display: flex; justify-content: space-between; align-items: center; }
 #qchonon-panel .q-label-row span:last-child { font-size: 9px; letter-spacing: 0.4px; }
 #qchonon-panel .q-foot {
@@ -793,6 +882,18 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return '';
     }
 
+    // Color of a DA, by its position in the DA list.
+    function daColor(name) {
+        const i = currentDAs.indexOf(name);
+
+        return DA_COLORS[(i < 0 ? 0 : i) % DA_COLORS.length];
+    }
+
+    // Color of a queue type (Standard / Wedding).
+    function queueColor(name) {
+        return QUEUE_COLORS[name] || QUEUE_FALLBACK_COLOR;
+    }
+
     // ============================================================
     // SEEN PROOFS (so each proof notifies only once)
     // ============================================================
@@ -837,6 +938,10 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // twice counts once, and the numbers start fresh every new day.
     // The "Reset" button sets today's numbers back to 0.
     //
+    // The TOTAL for today is its own list of unique proof IDs (proofs),
+    // so it never depends on the DA list. Per-DA and per-queue lists
+    // are extra breakdowns.
+    //
     // ALL-TIME: one running number that goes up by 1 for every newly
     // counted proof. It survives the daily reset and the Reset button.
     // Only "Clear all" sets it back to 0.
@@ -850,17 +955,37 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return dateKeyFrom(new Date());
     }
 
+    function ensureAssignedShape(a) {
+        if (!a.byQueue || typeof a.byQueue !== 'object') {
+            a.byQueue = {};
+        }
+
+        // Unique proofs assigned today (the real total). Built from the old
+        // per-DA lists the first time, so today's existing count is kept.
+        if (!Array.isArray(a.proofs)) {
+            const all = new Set();
+
+            Object.keys(a.byDA).forEach((name) => {
+                (a.byDA[name] || []).forEach((id) => all.add(id));
+            });
+
+            a.proofs = Array.from(all);
+        }
+
+        return a;
+    }
+
     function loadAssigned() {
         try {
             const parsed = JSON.parse(localStorage.getItem(ASSIGNED_KEY));
 
             if (parsed && parsed.byDA && typeof parsed.byDA === 'object') {
                 if (parsed.date === todayKey()) {
-                    return parsed;
+                    return ensureAssignedShape(parsed);
                 }
 
                 // A new day started: today's numbers start from 0.
-                const fresh = { date: todayKey(), byDA: {} };
+                const fresh = { date: todayKey(), byDA: {}, byQueue: {}, proofs: [] };
 
                 writeStorage(ASSIGNED_KEY, JSON.stringify(fresh));
 
@@ -870,7 +995,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             // fall through to a fresh record
         }
 
-        return { date: todayKey(), byDA: {} };
+        return { date: todayKey(), byDA: {}, byQueue: {}, proofs: [] };
     }
 
     let assigned = loadAssigned();
@@ -884,8 +1009,44 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function assignedTodayTotal() {
-        return Object.keys(assigned.byDA)
-            .reduce((sum, name) => sum + (assigned.byDA[name] || []).length, 0);
+        return (assigned.proofs || []).length;
+    }
+
+    function getQueueName($row) {
+        const text = cellText($row, COL_QUEUE).toLowerCase();
+
+        return QUEUE_TYPES.find((name) => text.includes(name.toLowerCase())) || '';
+    }
+
+    // Updates the Standard / Wedding rows: proofs showing now + assigned today.
+    function renderQueueCounts() {
+        const counts = {};
+
+        QUEUE_TYPES.forEach((name) => {
+            counts[name] = 0;
+        });
+
+        $('#resultTable tbody tr:visible').each(function () {
+            const name = getQueueName($(this));
+
+            if (name) {
+                counts[name]++;
+            }
+        });
+
+        document.querySelectorAll('#qchonon-panel .q-qshow').forEach((el) => {
+            const n = counts[el.dataset.q] || 0;
+
+            el.textContent = n;
+            el.classList.toggle('zero', n === 0);
+        });
+
+        document.querySelectorAll('#qchonon-panel .q-qassigned').forEach((el) => {
+            const n = ((assigned.byQueue || {})[el.dataset.q] || []).length;
+
+            el.textContent = n;
+            el.classList.toggle('zero', n === 0);
+        });
     }
 
     function loadAllTime() {
@@ -965,6 +1126,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             el.classList.toggle('zero', n === 0);
         });
 
+        renderQueueCounts();
+
         const todayTotal = assignedTodayTotal();
         const todayEl = document.getElementById('q-total-today');
 
@@ -988,20 +1151,41 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         assigned = loadAssigned();
 
         const $row = $link.closest('tr');
-        const daName = getMatchedDA($row);
         const proofID = cellText($row, COL_PROOF);
 
-        if (!daName || !proofID) {
+        if (!proofID) {
+            console.warn('[Kapoy QC] Assign clicked but no proof ID found.');
             return;
         }
 
-        const list = assigned.byDA[daName] || (assigned.byDA[daName] = []);
-
-        if (list.includes(proofID)) {
+        // Same proof clicked twice today = counted once.
+        if (assigned.proofs.includes(proofID)) {
             return;
         }
 
-        list.push(proofID);
+        assigned.proofs.push(proofID);
+
+        // Per-DA count (only if the row matches a listed DA).
+        const daName = getMatchedDA($row);
+
+        if (daName) {
+            const list = assigned.byDA[daName] || (assigned.byDA[daName] = []);
+
+            if (!list.includes(proofID)) {
+                list.push(proofID);
+            }
+        }
+
+        // Per-queue count (Standard / Wedding).
+        const queueName = getQueueName($row);
+
+        if (queueName) {
+            const queueList = assigned.byQueue[queueName] || (assigned.byQueue[queueName] = []);
+
+            if (!queueList.includes(proofID)) {
+                queueList.push(proofID);
+            }
+        }
 
         saveAssigned();
 
@@ -1015,45 +1199,48 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function setupAssignTracking() {
-        // Left click, and middle click (open in new tab) both count.
-        $(document).on('click auxclick', '#resultTable a.q-assign', function (event) {
+        // Capture phase on document: runs before the site's own handlers,
+        // so a stopPropagation() on the page can't hide the click from us.
+        function handle(event) {
+            if (event.type === 'click' && event.button !== 0) {
+                return;
+            }
+
             if (event.type === 'auxclick' && event.button !== 1) {
                 return;
             }
 
-            trackAssign($(this));
-        });
+            const link = event.target && event.target.closest
+                ? event.target.closest('#resultTable a')
+                : null;
+
+            if (!link || normalize(link.textContent).toLowerCase() !== 'assign to me') {
+                return;
+            }
+
+            trackAssign($(link));
+        }
+
+        document.addEventListener('click', handle, true);
+        document.addEventListener('auxclick', handle, true);
     }
 
     function setupAssignedReset() {
-        // Reset = today's numbers only. The all-time total stays.
+        // Reset = today's assigned numbers back to 0.
         document.getElementById('q-reset-assigned').addEventListener('click', function () {
-            if (!window.confirm("Reset today's assigned counts to 0?\n(The all-time total is kept.)")) {
+            if (!window.confirm("Reset today's assigned counts to 0?")) {
                 return;
             }
 
-            assigned = { date: todayKey(), byDA: {} };
+            assigned = { date: todayKey(), byDA: {}, byQueue: {}, proofs: [] };
 
             saveAssigned();
-            renderAssigned();
-        });
-
-        // Clear all = today's numbers AND the all-time total.
-        document.getElementById('q-clear-all').addEventListener('click', function () {
-            if (!window.confirm("Clear everything?\nThis sets today's counts AND the all-time total to 0.")) {
-                return;
-            }
-
-            assigned = { date: todayKey(), byDA: {} };
-
-            saveAssigned();
-            saveAllTime({ since: todayKey(), count: 0 });
             renderAssigned();
         });
     }
 
     // ============================================================
-    // FILTER + COUNT + ASSIGN LINKS
+    // FILTER + COUNT + ASSIGN LINKS + COLORS
     // ============================================================
 
     function filterRows() {
@@ -1066,6 +1253,37 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             }
 
             $row.toggle(Boolean(getMatchedDA($row)));
+        });
+    }
+
+    // Colors each row by its DA (left bar + soft tint) and the Queue cell by
+    // its queue type. The DA name cells are left alone, so names stay white.
+    function colorRows() {
+        $('#resultTable tbody tr').each(function () {
+            const $row = $(this);
+
+            if (!$row.children('td').length) {
+                return;
+            }
+
+            const da = getMatchedDA($row);
+
+            if (da) {
+                $row[0].style.setProperty('--q-da', daColor(da));
+                $row.addClass('q-colored');
+            } else {
+                $row.removeClass('q-colored');
+            }
+
+            const queue = getQueueName($row);
+            const $queueCell = $row.children(`td:nth-child(${COL_QUEUE})`);
+
+            if (queue && $queueCell.length) {
+                $queueCell[0].style.setProperty('--q-queue', queueColor(queue));
+                $queueCell.addClass('q-queue-cell');
+            } else {
+                $queueCell.removeClass('q-queue-cell');
+            }
         });
     }
 
@@ -1189,9 +1407,17 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         try {
             const notification = new Notification(title, {
                 body: body,
-                tag: tag, // unique per proof, so they don't replace each other
+                tag: tag, // same tag = the new popup replaces the old one
+                renotify: true, // still alert (sound/flash) when it replaces one
                 requireInteraction: NOTIFICATION_STAYS_UNTIL_DISMISSED
             });
+
+            // Windows may keep a popup in the Action Center, so close it ourselves.
+            if (!NOTIFICATION_STAYS_UNTIL_DISMISSED) {
+                setTimeout(function () {
+                    notification.close();
+                }, NOTIFICATION_SECONDS * 1000);
+            }
 
             notification.onclick = function () {
                 window.focus();
@@ -1235,6 +1461,37 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return proofs;
     }
 
+    // One popup per batch: full details for a single proof, a short
+    // per-DA summary when several arrive at once.
+    function notifyNewProofs(list) {
+        if (list.length === 1) {
+            const p = list[0];
+
+            notify(
+                `New Proof - ${p.daName}`,
+                `Proof ${p.proofID} • ${p.queue || 'Unknown Queue'}`,
+                NOTIFICATION_TAG
+            );
+
+            return;
+        }
+
+        const byDA = {};
+
+        list.forEach((p) => {
+            (byDA[p.daName] || (byDA[p.daName] = [])).push(p);
+        });
+
+        const lines = Object.keys(byDA).map((name) => {
+            const ids = byDA[name].map((p) => p.proofID);
+            const shown = ids.slice(0, 3).join(', ');
+
+            return `${name}: ${ids.length} (${shown}${ids.length > 3 ? ', ...' : ''})`;
+        });
+
+        notify(`${list.length} New Proofs`, lines.join('\n'), NOTIFICATION_TAG);
+    }
+
     function checkForNewProofs(proofs) {
         if (!proofs.length) {
             return;
@@ -1268,14 +1525,10 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             beep();
         }
 
-        // One notification per proof.
-        newProofs.forEach((p) => {
-            notify(
-                `New Proof - ${p.daName}`,
-                `Proof ${p.proofID} • ${p.queue || 'Unknown Queue'}`,
-                `qchonon-proof-${p.proofID}`
-            );
-        });
+        // One grouped notification for the whole batch.
+        if (newProofs.length) {
+            notifyNewProofs(newProofs);
+        }
 
         // Refresh the timestamp of every proof still on the page, so a proof
         // that stays for days is not forgotten and notified a second time.
@@ -1326,6 +1579,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             el.textContent = n;
             el.classList.toggle('zero', n === 0);
         });
+
+        renderQueueCounts();
     }
 
     function setLastCheck(text) {
@@ -1359,35 +1614,45 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         panel.id = 'qchonon-panel';
 
         panel.innerHTML = `
-            <div class="q-head" id="q-head"><span>Kapoy QC</span><span class="q-tools"><button type="button" id="q-collapse" title="Hide panel">▾</button><span class="q-grip">⋮⋮</span></span></div>
+            <div class="q-head" id="q-head"><span>Kapoy QC</span><span class="q-tools"><button type="button" id="q-settings-btn" title="Settings">⚙</button><button type="button" id="q-collapse" title="Hide panel">▾</button><span class="q-grip">⋮⋮</span></span></div>
             <div class="q-body">
-                <div class="q-label">APPEARANCE</div>
-                <div class="q-row">
-                    <span>Theme: <strong id="q-theme-label"></strong></span>
-                    <label class="q-switch" title="Switch light / dark">
-                        <input type="checkbox" id="q-theme">
-                        <span class="q-slider"></span>
-                    </label>
-                </div>
-                <div class="q-divider"></div>
+                <div id="q-settings" hidden>
+                    <div class="q-label q-label-row">
+                        <span>SETTINGS</span>
+                        <button type="button" class="q-btn q-mini" id="q-settings-back" title="Back to the tracker">Back</button>
+                    </div>
+                    <div class="q-divider"></div>
 
-                <div class="q-label">RELOAD</div>
-                <div class="q-row">
-                    <span>Auto-reload: <strong id="q-auto-label"></strong></span>
-                    <label class="q-switch" title="Turn auto-reload on / off">
-                        <input type="checkbox" id="q-auto">
-                        <span class="q-slider"></span>
-                    </label>
+                    <div class="q-label">APPEARANCE</div>
+                    <div class="q-row">
+                        <span>Theme: <strong id="q-theme-label"></strong></span>
+                        <label class="q-switch" title="Switch light / dark">
+                            <input type="checkbox" id="q-theme">
+                            <span class="q-slider"></span>
+                        </label>
+                    </div>
+                    <div class="q-divider"></div>
+
+                    <div class="q-label">RELOAD</div>
+                    <div class="q-row">
+                        <span>Auto-reload: <strong id="q-auto-label"></strong></span>
+                        <label class="q-switch" title="Turn auto-reload on / off">
+                            <input type="checkbox" id="q-auto">
+                            <span class="q-slider"></span>
+                        </label>
+                    </div>
+                    <div class="q-row">
+                        <span>Every</span>
+                        <span class="q-interval">
+                            <input class="q-number" id="q-interval" type="number"
+                                   min="${MIN_RELOAD_SECONDS}" max="${MAX_RELOAD_SECONDS}"
+                                   value="${reloadSeconds}">
+                            <span>sec</span>
+                        </span>
+                    </div>
                 </div>
-                <div class="q-row">
-                    <span>Every</span>
-                    <span class="q-interval">
-                        <input class="q-number" id="q-interval" type="number"
-                               min="${MIN_RELOAD_SECONDS}" max="${MAX_RELOAD_SECONDS}"
-                               value="${reloadSeconds}">
-                        <span>sec</span>
-                    </span>
-                </div>
+
+                <div id="q-main">
                 <div class="q-row q-reload">
                     <span>Reloading in</span>
                     <strong id="q-countdown">--</strong>
@@ -1412,22 +1677,21 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 <div class="q-divider"></div>
                 <div class="q-label q-label-row">
                     <span>TOTAL ASSIGNED</span>
-                    <span>TODAY · ALL-TIME</span>
+                    <span>TODAY</span>
                 </div>
-                <div class="q-da">
+                <div class="q-da" style="--q-rowcolor:var(--q-green)">
                     <strong>Total</strong>
                     <span class="q-chips">
                         <span class="q-count q-tot zero" id="q-total-today" title="Total assigned to me today">0</span>
-                        <span class="q-count q-tot zero" id="q-total-all" title="All-time total">0</span>
                     </span>
                 </div>
 
                 <div class="q-foot">
                     <span>Today resets daily</span>
                     <span class="q-foot-btns">
-                        <button type="button" class="q-btn" id="q-reset-assigned" title="Reset today's counts (all-time total is kept)">Reset</button>
-                        <button type="button" class="q-btn q-danger" id="q-clear-all" title="Reset today's counts AND the all-time total">Clear all</button>
+                        <button type="button" class="q-btn q-danger" id="q-reset-assigned" title="Reset today's assigned counts to 0">Reset</button>
                     </span>
+                </div>
                 </div>
             </div>
         `;
@@ -1441,6 +1705,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
         setupThemeSwitch();
         setupCollapse(panel);
+        setupSettingsView(panel);
         setupIntervalInput();
         setupAutoToggle();
         setupAssignedReset();
@@ -1458,8 +1723,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
         document.getElementById('q-das').innerHTML = currentDAs
             .map((name) => `
-                <div class="q-da">
-                    <span>${escapeHtml(name)}</span>
+                <div class="q-da" style="--q-rowcolor:${daColor(name)}">
+                    <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
                     <span class="q-chips">
                         <span class="q-count q-show ${counts[name] ? '' : 'zero'}" data-da="${escapeHtml(name)}" title="Proofs showing now">${counts[name]}</span>
                         <span class="q-count q-assigned zero" data-da="${escapeHtml(name)}" title="Assigned to me today">0</span>
@@ -1519,6 +1784,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             saveSeen();
 
             filterRows();
+            colorRows();
             updateCount();
             renderDAList();
             close();
@@ -1580,6 +1846,36 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         });
 
         applyCollapsed(panel);
+    }
+
+    // Gear button: switch between the tracker and the Settings section, single total.
+    function setupSettingsView(panel) {
+        const button = document.getElementById('q-settings-btn');
+        const back = document.getElementById('q-settings-back');
+        const settings = document.getElementById('q-settings');
+        const main = document.getElementById('q-main');
+
+        function show(open) {
+            settings.hidden = !open;
+            main.hidden = open;
+            button.classList.toggle('q-on', open);
+            button.title = open ? 'Back to the tracker' : 'Settings';
+
+            // Panel height changed: keep it fully on screen.
+            const rect = panel.getBoundingClientRect();
+
+            if (panel.style.left) {
+                placePanel(panel, rect.left, rect.top);
+            }
+        }
+
+        button.addEventListener('click', function () {
+            show(settings.hidden);
+        });
+
+        back.addEventListener('click', function () {
+            show(false);
+        });
     }
 
     function setupAutoToggle() {
@@ -1700,7 +1996,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         let offsetY = 0;
 
         handle.addEventListener('mousedown', function (event) {
-            if (event.button !== 0 || event.target.closest('#q-collapse')) {
+            if (event.button !== 0 || event.target.closest('button')) {
                 return;
             }
 
@@ -1747,6 +2043,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // Re-runs everything that depends on the table after its rows changed.
     function applyRefreshedTable() {
         filterRows();
+        colorRows();
         updateCount();
         openAssignInNewTab();
 
@@ -1925,6 +2222,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         safe('all-time total', initAllTime);
 
         safe('filter rows', filterRows);
+        safe('color rows', colorRows);
 
         // Rows are filtered now, so they can be shown.
         document.documentElement.classList.remove('q-pending');
