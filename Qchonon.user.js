@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      2.8
-// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, editable DA names (in the panel), Standard / Wedding queue tracker, assigned counter per DA, total assigned (today + all-time), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts, color-coded DAs and queues, grouped notifications, Settings section, single total
-// @match        https://mbo.minted.com/mbo/proofs?action=filter*
+// @version      3.1
+// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, editable DA names (in the panel), Standard / Wedding queue tracker, assigned counter per DA, total assigned (today + all-time), every click counts everywhere (duplicates included), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts, color-coded DAs and queues, grouped notifications, Settings section, single total
+// @match        https://mbo.minted.com/mbo/proofs?action=filter&state=2070&flag=-1&queue=-1&sku=&studio_org=-1&fulfiller=-1&limit_proofs=
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @downloadURL  https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @grant        none
@@ -934,17 +934,14 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // ============================================================
     // ASSIGNED TRACKER (+1 on the DA when you click "assign to me")
     // ============================================================
-    // TODAY: saved per day and per proof ID, so clicking the same proof
-    // twice counts once, and the numbers start fresh every new day.
-    // The "Reset" button sets today's numbers back to 0.
+    // EVERY "assign to me" click counts everywhere (duplicates included):
+    // the TOTAL, the per-DA count and the per-queue count all go up by 1,
+    // so clicking the same proof twice counts twice. Numbers start fresh
+    // every new day. The "Reset" button sets today's numbers back to 0.
     //
-    // The TOTAL for today is its own list of unique proof IDs (proofs),
-    // so it never depends on the DA list. Per-DA and per-queue lists
-    // are extra breakdowns.
-    //
-    // ALL-TIME: one running number that goes up by 1 for every newly
-    // counted proof. It survives the daily reset and the Reset button.
-    // Only "Clear all" sets it back to 0.
+    // ALL-TIME: one running number that goes up by 1 for every click
+    // (duplicates included). It survives the daily reset and the Reset
+    // button. Only "Clear all" sets it back to 0.
     // Shape: { since: 'YYYY-MM-DD', count: number }
 
     function dateKeyFrom(d) {
@@ -955,13 +952,17 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return dateKeyFrom(new Date());
     }
 
+    function newAssignedRecord() {
+        return { date: todayKey(), byDA: {}, byQueue: {}, proofs: [], total: 0 };
+    }
+
     function ensureAssignedShape(a) {
         if (!a.byQueue || typeof a.byQueue !== 'object') {
             a.byQueue = {};
         }
 
-        // Unique proofs assigned today (the real total). Built from the old
-        // per-DA lists the first time, so today's existing count is kept.
+        // Unique proofs assigned today. Built from the old per-DA lists
+        // the first time, so today's existing count is kept.
         if (!Array.isArray(a.proofs)) {
             const all = new Set();
 
@@ -970,6 +971,12 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             });
 
             a.proofs = Array.from(all);
+        }
+
+        // Total clicks today (duplicates included). Starts from the unique
+        // count the first time, so today's existing number is kept.
+        if (typeof a.total !== 'number') {
+            a.total = a.proofs.length;
         }
 
         return a;
@@ -985,7 +992,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 }
 
                 // A new day started: today's numbers start from 0.
-                const fresh = { date: todayKey(), byDA: {}, byQueue: {}, proofs: [] };
+                const fresh = newAssignedRecord();
 
                 writeStorage(ASSIGNED_KEY, JSON.stringify(fresh));
 
@@ -995,7 +1002,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             // fall through to a fresh record
         }
 
-        return { date: todayKey(), byDA: {}, byQueue: {}, proofs: [] };
+        return newAssignedRecord();
     }
 
     let assigned = loadAssigned();
@@ -1009,7 +1016,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function assignedTodayTotal() {
-        return (assigned.proofs || []).length;
+        return assigned.total || 0;
     }
 
     function getQueueName($row) {
@@ -1158,43 +1165,37 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             return;
         }
 
-        // Same proof clicked twice today = counted once.
-        if (assigned.proofs.includes(proofID)) {
-            return;
-        }
+        // Every click counts everywhere (duplicates included):
+        // Total, All-time, per-DA and per-queue.
+        assigned.total++;
 
-        assigned.proofs.push(proofID);
-
-        // Per-DA count (only if the row matches a listed DA).
-        const daName = getMatchedDA($row);
-
-        if (daName) {
-            const list = assigned.byDA[daName] || (assigned.byDA[daName] = []);
-
-            if (!list.includes(proofID)) {
-                list.push(proofID);
-            }
-        }
-
-        // Per-queue count (Standard / Wedding).
-        const queueName = getQueueName($row);
-
-        if (queueName) {
-            const queueList = assigned.byQueue[queueName] || (assigned.byQueue[queueName] = []);
-
-            if (!queueList.includes(proofID)) {
-                queueList.push(proofID);
-            }
-        }
-
-        saveAssigned();
-
-        // New proof counted today: add it to the all-time total too.
         const allTime = loadAllTime() || { since: todayKey(), count: 0 };
 
         allTime.count++;
         saveAllTime(allTime);
 
+        const daName = getMatchedDA($row);
+
+        if (daName) {
+            const daList = assigned.byDA[daName] || (assigned.byDA[daName] = []);
+
+            daList.push(proofID); // no duplicate check
+        }
+
+        const queueName = getQueueName($row);
+
+        if (queueName) {
+            const queueList = assigned.byQueue[queueName] || (assigned.byQueue[queueName] = []);
+
+            queueList.push(proofID); // no duplicate check
+        }
+
+        // Unique proof list (kept for compatibility, no longer affects any number).
+        if (!assigned.proofs.includes(proofID)) {
+            assigned.proofs.push(proofID);
+        }
+
+        saveAssigned();
         renderAssigned();
     }
 
@@ -1232,7 +1233,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 return;
             }
 
-            assigned = { date: todayKey(), byDA: {}, byQueue: {}, proofs: [] };
+            assigned = newAssignedRecord();
 
             saveAssigned();
             renderAssigned();
@@ -1682,7 +1683,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 <div class="q-da" style="--q-rowcolor:var(--q-green)">
                     <strong>Total</strong>
                     <span class="q-chips">
-                        <span class="q-count q-tot zero" id="q-total-today" title="Total assigned to me today">0</span>
+                        <span class="q-count q-tot zero" id="q-total-today" title="Total assign clicks today (duplicates included)">0</span>
                     </span>
                 </div>
 
@@ -1727,7 +1728,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                     <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
                     <span class="q-chips">
                         <span class="q-count q-show ${counts[name] ? '' : 'zero'}" data-da="${escapeHtml(name)}" title="Proofs showing now">${counts[name]}</span>
-                        <span class="q-count q-assigned zero" data-da="${escapeHtml(name)}" title="Assigned to me today">0</span>
+                        <span class="q-count q-assigned zero" data-da="${escapeHtml(name)}" title="Assigned to me today (duplicates included)">0</span>
                     </span>
                 </div>
             `)
