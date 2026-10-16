@@ -1,18 +1,28 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  Show only proofs of selected DAs, count, auto-reload (adjustable in the panel), per-proof desktop notifications, "assign to me" in new tab, dark/light theme, unified buttons/dropdowns, hide/show panel, editable DA names (in the panel), Standard / Wedding queue tracker, assigned counter per DA, total assigned (today + all-time), every click counts everywhere (duplicates included), background refresh (no page reload), new-proof beep, auto-reload on/off switch, better fonts, color-coded DAs and queues, grouped notifications, Settings section, single total
-// @match        https://mbo.minted.com/mbo/proofs?action=filter&state=2070&flag=-1&queue=-1&sku=&studio_org=-1&fulfiller=-1&limit_proofs=
+// @version      3.2
+// @description  Show only proofs of selected DAs, count, auto-reload (adjustable), grouped desktop notifications + beep for new proofs, "assign to me" in new tab, assigned counter per DA + total (today), dark/light theme, editable DA names, background refresh that keeps the site's row handlers, multi-tab sync
+// @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @downloadURL  https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @grant        none
 // @run-at       document-start
-// @require      https://code.jquery.com/jquery-3.7.1.min.js
+// @require      https://code.jquery.com/jquery-3.7.1.min.js#sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
 // ==/UserScript==
 
 (function ($) {
     'use strict';
+
+    // The @match is broad on purpose (parameter order / extra params can change).
+    // Only run on the actual "filter by state 2070" page.
+    (function () {
+        const params = new URLSearchParams(window.location.search);
+
+        if (params.get('action') !== 'filter' || params.get('state') !== '2070') {
+            throw new Error('[Kapoy QC] Not the QC proofs page, script idle.');
+        }
+    })();
 
     // ============================================================
     // CONFIG
@@ -26,21 +36,26 @@
         'Sherwin Jay Acruz'
     ];
 
-    // Table columns (1-based, as used by nth-child):
-    // 4 = Proof ID, 7 = Queue, 13 = State, 15 = Accepted DA, 16 = Target DA
+    // Fallback table columns (1-based, as used by nth-child). The script first
+    // tries to find the columns by their header text (Proof ID, Queue, State,
+    // Accepted DA, Target DA) and only uses these numbers if that fails.
     const COL_PROOF = 4;
     const COL_QUEUE = 7;
     const COL_STATE = 13;
     const DA_COLUMNS = [15, 16];
 
-    // Queue types to track (showing + assigned today). A proof belongs to a
-    // type when its Queue cell (column 7) contains that word, any capitals.
+    // Header text used to find the columns (case-insensitive, regex).
+    const HEADER_PATTERNS = {
+        proof: /^proof\s*(id|#)?$/i,
+        queue: /^queue$/i,
+        state: /^state$/i,
+        da: [/accepted\s*da/i, /target\s*da/i]
+    };
+
+    // Queue types to color (Queue column) and show in notifications.
     const QUEUE_TYPES = ['Standard', 'Wedding'];
 
-    // Colors that tell the DAs apart. They are given out in the order of the
-    // DA list (first DA = first color, and so on; it repeats if you add more DAs
-    // than there are colors). Change the hex values freely.
-    // The DA names themselves stay in the normal text color (white in dark theme).
+    // Colors that tell the DAs apart (given out in the order of the DA list).
     const DA_COLORS = [
         '#4f8cff', // blue
         '#ff7043', // orange
@@ -52,72 +67,56 @@
         '#8d6e63'  // brown
     ];
 
-    // Colors for the queue types (Queue column + panel rows).
     const QUEUE_COLORS = {
         Standard: '#42a5f5',
         Wedding: '#f06292'
     };
     const QUEUE_FALLBACK_COLOR = '#9e9e9e';
 
-    // Reload interval is now changed in the panel. This is only the
-    // starting value used the very first time (it is saved afterwards).
     const DEFAULT_RELOAD_SECONDS = 10;
     const MIN_RELOAD_SECONDS = 5;
     const MAX_RELOAD_SECONDS = 3600;
 
-    // Theme used the very first time ('dark' or 'light'). Changed in the panel.
     const DEFAULT_THEME = 'dark';
 
-    // true = skip a reload while any row checkbox is ticked,
-    // so you don't lose your selection mid-action.
+    // true = skip a refresh while any row checkbox is ticked.
     const SKIP_RELOAD_IF_CHECKED = true;
 
-    // New proofs are grouped into ONE popup per refresh (a summary per DA),
-    // and a newer popup replaces the previous one, so only one is ever on screen.
-    const NOTIFICATION_TAG = 'qchonon-new-proofs';
-
-    // Seconds before a popup closes by itself (only when
-    // NOTIFICATION_STAYS_UNTIL_DISMISSED is false).
+    const NOTIFICATION_TAG = 'kapoyqc-new-proofs';
     const NOTIFICATION_SECONDS = 6;
-
-    // true = notifications stay until dismissed. false = they auto-dismiss.
     const NOTIFICATION_STAYS_UNTIL_DISMISSED = false;
 
-    // true = play a short beep when a new proof appears (along with the
-    // desktop notification). Browsers only allow sound after you have
-    // clicked or pressed a key on the page once, so click anywhere after
-    // opening the tab. Volume is 0 (silent) to 1 (loudest).
     const NOTIFICATION_SOUND = true;
     const NOTIFICATION_SOUND_VOLUME = 0.2;
 
-    // true  = refresh the table in the background (no page reload, keeps your
-    //         scroll position and the panel). If anything on the page stops
-    //         working after a refresh, set this to false to go back to a full reload.
-    // false = full page reload like before.
+    // true  = refresh the table in the background (no page reload).
+    // false = full page reload.
     const USE_BACKGROUND_REFRESH = true;
-
-    // Give up on a background refresh after this many milliseconds.
     const REFRESH_TIMEOUT_MS = 20000;
 
-    // Forget "already notified" proofs that have not been on the page for this many days.
+    // Forget "already notified" proofs not on the page for this many days.
     const SEEN_MAX_DAYS = 7;
 
-    const SEEN_KEY = 'Qchonon_Seen_Proofs';
-    const SEEN_INIT_KEY = 'Qchonon_Seen_Initialized';
-    const POSITION_KEY = 'Qchonon_Panel_Position';
-    const THEME_KEY = 'Qchonon_Theme';
-    const COLLAPSED_KEY = 'Qchonon_Panel_Collapsed';
-    const RELOAD_KEY = 'Qchonon_Reload_Seconds';
-    const AUTO_KEY = 'Qchonon_Auto_Reload';
-    const ASSIGNED_KEY = 'Qchonon_Assigned_Today';
-    const ALLTIME_KEY = 'Qchonon_Assigned_AllTime';
-    const DAS_KEY = 'Qchonon_DA_Names';
-    // Old history storage (removed in v2.0). Only used once to carry the
-    // old all-time total over, then it is deleted.
-    const OLD_HISTORY_KEY = 'Qchonon_Assigned_History';
+    // Storage: everything except the two fast-changing lists lives in ONE
+    // settings object.
+    const SETTINGS_KEY = 'KapoyQC_Settings';
+    const SEEN_KEY = 'KapoyQC_Seen';
+    const ASSIGNED_KEY = 'KapoyQC_Assigned';
 
-    // Message and color by workload. "max: Infinity" means no upper limit.
-    // color = light theme, darkColor = dark theme.
+    const LEGACY_KEYS = {
+        seen: 'Qchonon_Seen_Proofs',
+        seenInit: 'Qchonon_Seen_Initialized',
+        position: 'Qchonon_Panel_Position',
+        theme: 'Qchonon_Theme',
+        collapsed: 'Qchonon_Panel_Collapsed',
+        reload: 'Qchonon_Reload_Seconds',
+        auto: 'Qchonon_Auto_Reload',
+        assigned: 'Qchonon_Assigned_Today',
+        allTime: 'Qchonon_Assigned_AllTime',
+        das: 'Qchonon_DA_Names',
+        oldHistory: 'Qchonon_Assigned_History'
+    };
+
     const LEVELS = [
         {
             name: 'low',
@@ -148,7 +147,7 @@
     ];
 
     // ============================================================
-    // SETTINGS (theme + reload interval, saved in localStorage)
+    // STORAGE + SETTINGS (one object, old Qchonon_* keys migrated once)
     // ============================================================
 
     function readStorage(key) {
@@ -163,7 +162,23 @@
         try {
             localStorage.setItem(key, value);
         } catch (error) {
-            console.error('[Kapoy QC] Failed to save setting:', key, error);
+            console.error('[Kapoy QC] Failed to save:', key, error);
+        }
+    }
+
+    function removeStorage(key) {
+        try {
+            localStorage.removeItem(key);
+        } catch (error) {
+            // ignore
+        }
+    }
+
+    function parseJSON(text) {
+        try {
+            return JSON.parse(text);
+        } catch (error) {
+            return null;
         }
     }
 
@@ -177,36 +192,126 @@
         return Math.max(MIN_RELOAD_SECONDS, Math.min(MAX_RELOAD_SECONDS, n));
     }
 
-    let theme = readStorage(THEME_KEY) === 'light' ? 'light'
-        : readStorage(THEME_KEY) === 'dark' ? 'dark'
-        : DEFAULT_THEME;
+    function defaultSettings() {
+        return {
+            theme: DEFAULT_THEME,
+            reloadSeconds: DEFAULT_RELOAD_SECONDS,
+            auto: true,
+            collapsed: false,
+            position: null,
+            daNames: null,
+            seenInit: false
+        };
+    }
 
-    let reloadSeconds = readStorage(RELOAD_KEY)
-        ? clampSeconds(readStorage(RELOAD_KEY))
-        : DEFAULT_RELOAD_SECONDS;
+    // One-time move from the old separate keys to the new ones.
+    function migrateLegacy() {
+        if (readStorage(SETTINGS_KEY) !== null) {
+            return;
+        }
 
-    // Auto-reload on or off (switch in the panel). On by default. Saved between reloads.
-    let autoReload = readStorage(AUTO_KEY) !== 'off';
+        const hasLegacy = Object.keys(LEGACY_KEYS)
+            .some((name) => readStorage(LEGACY_KEYS[name]) !== null);
 
-    // Panel hidden (collapsed to its title bar) or shown. Saved between reloads.
-    let collapsed = readStorage(COLLAPSED_KEY) === 'yes';
+        if (!hasLegacy) {
+            return;
+        }
+
+        const s = defaultSettings();
+        const theme = readStorage(LEGACY_KEYS.theme);
+        const reload = readStorage(LEGACY_KEYS.reload);
+        const position = parseJSON(readStorage(LEGACY_KEYS.position));
+        const das = parseJSON(readStorage(LEGACY_KEYS.das));
+
+        if (theme === 'light' || theme === 'dark') {
+            s.theme = theme;
+        }
+
+        if (reload) {
+            s.reloadSeconds = clampSeconds(reload);
+        }
+
+        s.auto = readStorage(LEGACY_KEYS.auto) !== 'off';
+        s.collapsed = readStorage(LEGACY_KEYS.collapsed) === 'yes';
+        s.seenInit = readStorage(LEGACY_KEYS.seenInit) === 'yes';
+
+        if (position && typeof position.left === 'number' && typeof position.top === 'number') {
+            s.position = { left: position.left, top: position.top };
+        }
+
+        if (Array.isArray(das) && das.length) {
+            s.daNames = das;
+        }
+
+        writeStorage(SETTINGS_KEY, JSON.stringify(s));
+
+        const seen = readStorage(LEGACY_KEYS.seen);
+        const assignedOld = readStorage(LEGACY_KEYS.assigned);
+
+        if (seen !== null && readStorage(SEEN_KEY) === null) {
+            writeStorage(SEEN_KEY, seen);
+        }
+
+        if (assignedOld !== null && readStorage(ASSIGNED_KEY) === null) {
+            writeStorage(ASSIGNED_KEY, assignedOld);
+        }
+
+        Object.keys(LEGACY_KEYS).forEach((name) => removeStorage(LEGACY_KEYS[name]));
+    }
+
+    function loadSettings() {
+        const parsed = parseJSON(readStorage(SETTINGS_KEY));
+        const s = defaultSettings();
+
+        if (parsed && typeof parsed === 'object') {
+            if (parsed.theme === 'light' || parsed.theme === 'dark') {
+                s.theme = parsed.theme;
+            }
+
+            if (parsed.reloadSeconds) {
+                s.reloadSeconds = clampSeconds(parsed.reloadSeconds);
+            }
+
+            s.auto = parsed.auto !== false;
+            s.collapsed = parsed.collapsed === true;
+            s.seenInit = parsed.seenInit === true;
+
+            if (parsed.position && typeof parsed.position.left === 'number' &&
+                typeof parsed.position.top === 'number') {
+                s.position = parsed.position;
+            }
+
+            if (Array.isArray(parsed.daNames) && parsed.daNames.length) {
+                s.daNames = parsed.daNames;
+            }
+        }
+
+        return s;
+    }
+
+    migrateLegacy();
+
+    const settings = loadSettings();
+
+    function saveSettings() {
+        writeStorage(SETTINGS_KEY, JSON.stringify(settings));
+    }
 
     // ============================================================
     // THEME (page + panel styles, injected immediately to avoid flashing)
     // ============================================================
 
-    // Clean system font stack (Segoe UI on Windows). No external font loading needed.
     const FONT_STACK = "'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, Roboto, 'Helvetica Neue', Arial, sans-serif";
 
     // Page rules only apply to the page, never to the Kapoy QC panel.
-    const PAGE = 'html.q-dark body > :not(#qchonon-panel)';
+    const PAGE = 'html.q-dark body > :not(#kqc-panel)';
 
     function within(list) {
         return list.map((s) => `${PAGE} ${s}`).join(',\n');
     }
 
     // Like within(), but for BOTH themes (used for the unified controls)
-    const ANY = 'html:root body > :not(#qchonon-panel)';
+    const ANY = 'html:root body > :not(#kqc-panel)';
 
     function ui(list) {
         return list.map((s) => `${ANY} ${s}`).join(',\n');
@@ -214,7 +319,7 @@
 
     function buildCss() {
         const transparentBg = [
-            'html.q-dark body > div:not(#qchonon-panel)',
+            'html.q-dark body > div:not(#kqc-panel)',
             within(['div', 'form', 'fieldset', 'section', 'footer'])
         ].join(',\n');
 
@@ -271,10 +376,12 @@ html.q-dark #resultTable tbody tr td { border-bottom: 1px solid #2e2e2e !importa
 html.q-dark #resultTable tbody tr:hover,
 html.q-dark #resultTable tbody tr:hover td { background: #272727 !important; }
 
-/* ---------- FONTS (both themes) ---------- */
-html:root body,
-html:root body > :not(#qchonon-panel),
-html:root body > :not(#qchonon-panel) * {
+/* ---------- FONTS (both themes, scoped to the table, forms, nav, message) ---------- */
+html:root body { font-family: ${FONT_STACK} !important; }
+html:root #resultTable, html:root #resultTable *,
+html:root form, html:root form *,
+html:root #nav, html:root #nav *,
+html:root div.warning {
     font-family: ${FONT_STACK} !important;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -324,7 +431,11 @@ html:root #resultTable tbody td a.q-assign:hover {
     border-color: var(--ql-primary-hover) !important;
 }
 
-/* ---------- DA / QUEUE COLORS (DA names stay in the normal text color) ---------- */
+/* Row you already clicked "assign to me" on (this page session) */
+html:root #resultTable tbody tr.q-clicked { opacity: 0.55; }
+html:root #resultTable tbody tr.q-clicked:hover { opacity: 0.85; }
+
+/* ---------- DA / QUEUE COLORS ---------- */
 html:root #resultTable tbody tr.q-colored td:first-child {
     box-shadow: inset 5px 0 0 var(--q-da);
 }
@@ -340,7 +451,7 @@ html:root #resultTable tbody td.q-queue-cell {
 }
 
 /* ---------- PANEL ---------- */
-#qchonon-panel {
+#kqc-panel {
     --q-bg: #171717; --q-head: #202020; --q-text: #f5f5f5; --q-muted: #999;
     --q-border: #333; --q-row: #292929; --q-green: #8ee09b; --q-amber: #f2c66d;
     --q-chip-bg: #473b24; --q-chip-zero-bg: #2a2a2a; --q-chip-zero: #888;
@@ -360,14 +471,14 @@ html:root #resultTable tbody td.q-queue-cell {
     font-size: 12px;
     overflow: hidden;
 }
-#qchonon-panel.q-light {
+#kqc-panel.q-light {
     --q-bg: #ffffff; --q-head: #f1f1f1; --q-text: #1b1b1b; --q-muted: #666;
     --q-border: #d6d6d6; --q-row: #eeeeee; --q-green: #2e7d32; --q-amber: #b26a00;
     --q-chip-bg: #fff0cf; --q-chip-zero-bg: #eeeeee; --q-chip-zero: #888;
     --q-input-bg: #ffffff; --q-input-border: #bbb; --q-shadow: rgba(0,0,0,0.2);
     color-scheme: light;
 }
-#qchonon-panel .q-head {
+#kqc-panel .q-head {
     padding: 10px 12px;
     background: var(--q-head);
     border-bottom: 1px solid var(--q-border);
@@ -378,11 +489,12 @@ html:root #resultTable tbody td.q-queue-cell {
     align-items: center;
     cursor: move;
     user-select: none;
+    touch-action: none;
 }
-#qchonon-panel .q-grip { color: var(--q-muted); font-size: 18px; letter-spacing: -3px; }
-#qchonon-panel .q-tools { display: inline-flex; align-items: center; gap: 8px; }
-#qchonon-panel button#q-collapse,
-#qchonon-panel button#q-settings-btn {
+#kqc-panel .q-grip { color: var(--q-muted); font-size: 18px; letter-spacing: -3px; }
+#kqc-panel .q-tools { display: inline-flex; align-items: center; gap: 8px; }
+#kqc-panel button#q-collapse,
+#kqc-panel button#q-settings-btn {
     width: 22px;
     height: 22px;
     padding: 0;
@@ -394,30 +506,30 @@ html:root #resultTable tbody td.q-queue-cell {
     line-height: 1;
     cursor: pointer;
 }
-#qchonon-panel button#q-collapse:hover,
-#qchonon-panel button#q-settings-btn:hover { color: var(--q-text); border-color: var(--q-muted); }
-#qchonon-panel button#q-settings-btn.q-on { color: var(--q-text); border-color: var(--q-amber); }
-#qchonon-panel.q-collapsed .q-body { display: none; }
-#qchonon-panel.q-collapsed .q-head { border-bottom: none; }
-#qchonon-panel .q-body { padding: 10px 12px 12px; }
-#qchonon-panel .q-label {
+#kqc-panel button#q-collapse:hover,
+#kqc-panel button#q-settings-btn:hover { color: var(--q-text); border-color: var(--q-muted); }
+#kqc-panel button#q-settings-btn.q-on { color: var(--q-text); border-color: var(--q-amber); }
+#kqc-panel.q-collapsed .q-body { display: none; }
+#kqc-panel.q-collapsed .q-head { border-bottom: none; }
+#kqc-panel .q-body { padding: 10px 12px 12px; }
+#kqc-panel .q-label {
     margin: 0 0 6px;
     color: var(--q-muted);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.8px;
 }
-#qchonon-panel .q-row {
+#kqc-panel .q-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 4px 0;
 }
-#qchonon-panel .q-reload strong { font-size: 15px; color: var(--q-green); }
-#qchonon-panel .q-reload strong.paused { color: var(--q-amber); font-size: 12px; }
-#qchonon-panel .q-last { color: var(--q-muted); font-size: 11px; padding-bottom: 8px; }
-#qchonon-panel .q-divider { height: 1px; margin: 6px 0 10px; background: var(--q-border); }
-#qchonon-panel .q-da {
+#kqc-panel .q-reload strong { font-size: 15px; color: var(--q-green); }
+#kqc-panel .q-reload strong.paused { color: var(--q-amber); font-size: 12px; }
+#kqc-panel .q-last { color: var(--q-muted); font-size: 11px; padding-bottom: 8px; }
+#kqc-panel .q-divider { height: 1px; margin: 6px 0 10px; background: var(--q-border); }
+#kqc-panel .q-da {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -425,25 +537,23 @@ html:root #resultTable tbody td.q-queue-cell {
     border-bottom: 1px solid var(--q-row);
     border-left: 3px solid var(--q-rowcolor, transparent);
 }
-#qchonon-panel .q-da:last-child { border-bottom: none; }
-/* Names and labels always stay on ONE line (long names get "...") */
-#qchonon-panel .q-da > span:first-child,
-#qchonon-panel .q-da > strong {
+#kqc-panel .q-da:last-child { border-bottom: none; }
+#kqc-panel .q-da > span:first-child,
+#kqc-panel .q-da > strong {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
 }
-#qchonon-panel .q-chips { flex: 0 0 auto; margin-left: 8px; }
-#qchonon-panel .q-label,
-#qchonon-panel .q-label-row span,
-#qchonon-panel .q-row,
-#qchonon-panel .q-last,
-#qchonon-panel .q-foot { white-space: nowrap; }
-/* Colored dot before each DA / queue name (the name text itself is unchanged) */
-#qchonon-panel .q-da > span:first-child::before,
-#qchonon-panel .q-da > strong::before {
+#kqc-panel .q-chips { flex: 0 0 auto; margin-left: 8px; }
+#kqc-panel .q-label,
+#kqc-panel .q-label-row span,
+#kqc-panel .q-row,
+#kqc-panel .q-last,
+#kqc-panel .q-foot { white-space: nowrap; }
+#kqc-panel .q-da > span:first-child::before,
+#kqc-panel .q-da > strong::before {
     content: '';
     display: inline-block;
     width: 8px;
@@ -452,7 +562,7 @@ html:root #resultTable tbody td.q-queue-cell {
     border-radius: 50%;
     background: var(--q-rowcolor, transparent);
 }
-#qchonon-panel .q-count {
+#kqc-panel .q-count {
     min-width: 22px;
     padding: 2px 7px;
     border-radius: 4px;
@@ -461,28 +571,23 @@ html:root #resultTable tbody td.q-queue-cell {
     font-weight: 700;
     text-align: center;
 }
-#qchonon-panel .q-count.zero { background: var(--q-chip-zero-bg); color: var(--q-chip-zero); }
-#qchonon-panel .q-chips { display: inline-flex; align-items: center; gap: 6px; }
-#qchonon-panel .q-count.q-assigned,
-#qchonon-panel .q-count.q-qassigned,
-#qchonon-panel .q-count.q-tot {
+#kqc-panel .q-count.zero { background: var(--q-chip-zero-bg); color: var(--q-chip-zero); }
+#kqc-panel .q-chips { display: inline-flex; align-items: center; gap: 6px; }
+#kqc-panel .q-count.q-assigned,
+#kqc-panel .q-count.q-tot {
     background: color-mix(in srgb, var(--q-green) 18%, transparent);
     color: var(--q-green);
 }
-#qchonon-panel .q-count.q-assigned.zero,
-#qchonon-panel .q-count.q-qassigned.zero,
-#qchonon-panel .q-count.q-tot.zero { background: var(--q-chip-zero-bg); color: var(--q-chip-zero); }
-/* Counters take the color of their DA / queue (only when above 0) */
-#qchonon-panel .q-da .q-count.q-show:not(.zero),
-#qchonon-panel .q-da .q-count.q-assigned:not(.zero),
-#qchonon-panel .q-da .q-count.q-qshow:not(.zero),
-#qchonon-panel .q-da .q-count.q-qassigned:not(.zero) {
+#kqc-panel .q-count.q-assigned.zero,
+#kqc-panel .q-count.q-tot.zero { background: var(--q-chip-zero-bg); color: var(--q-chip-zero); }
+#kqc-panel .q-da .q-count.q-show:not(.zero),
+#kqc-panel .q-da .q-count.q-assigned:not(.zero) {
     background: color-mix(in srgb, var(--q-rowcolor) 22%, transparent);
     color: var(--q-rowcolor);
 }
-#qchonon-panel .q-label-row { display: flex; justify-content: space-between; align-items: center; }
-#qchonon-panel .q-label-row span:last-child { font-size: 9px; letter-spacing: 0.4px; }
-#qchonon-panel .q-foot {
+#kqc-panel .q-label-row { display: flex; justify-content: space-between; align-items: center; }
+#kqc-panel .q-label-row span:last-child { font-size: 9px; letter-spacing: 0.4px; }
+#kqc-panel .q-foot {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -492,8 +597,8 @@ html:root #resultTable tbody td.q-queue-cell {
     color: var(--q-muted);
     font-size: 11px;
 }
-#qchonon-panel .q-foot-btns { display: inline-flex; gap: 6px; }
-#qchonon-panel button.q-btn {
+#kqc-panel .q-foot-btns { display: inline-flex; gap: 6px; }
+#kqc-panel button.q-btn {
     padding: 2px 9px;
     background: transparent;
     color: var(--q-muted);
@@ -502,13 +607,13 @@ html:root #resultTable tbody td.q-queue-cell {
     font-size: 11px;
     cursor: pointer;
 }
-#qchonon-panel button.q-btn:hover { color: var(--q-text); border-color: var(--q-muted); }
-#qchonon-panel button.q-btn.q-danger:hover { color: #ef5350; border-color: #ef5350; }
+#kqc-panel button.q-btn:hover { color: var(--q-text); border-color: var(--q-muted); }
+#kqc-panel button.q-btn.q-danger:hover { color: #ef5350; border-color: #ef5350; }
 
-#qchonon-panel [hidden] { display: none !important; }
-#qchonon-panel button.q-mini { margin-left: 6px; padding: 0 7px; font-size: 10px; letter-spacing: 0; }
-#qchonon-panel button.q-save { color: var(--q-green); border-color: var(--q-green); }
-#qchonon-panel textarea {
+#kqc-panel [hidden] { display: none !important; }
+#kqc-panel button.q-mini { margin-left: 6px; padding: 0 7px; font-size: 10px; letter-spacing: 0; }
+#kqc-panel button.q-save { color: var(--q-green); border-color: var(--q-green); }
+#kqc-panel textarea {
     box-sizing: border-box;
     width: 100%;
     padding: 6px 8px;
@@ -521,21 +626,21 @@ html:root #resultTable tbody td.q-queue-cell {
     line-height: 1.5;
     resize: vertical;
 }
-#qchonon-panel textarea:focus { outline: none; border-color: var(--q-amber); }
-#qchonon-panel .q-note { margin: 4px 0 6px; color: var(--q-muted); font-size: 10px; }
-#qchonon-panel .q-editor-btns { justify-content: flex-end; width: 100%; }
+#kqc-panel textarea:focus { outline: none; border-color: var(--q-amber); }
+#kqc-panel .q-note { margin: 4px 0 6px; color: var(--q-muted); font-size: 10px; }
+#kqc-panel .q-editor-btns { justify-content: flex-end; width: 100%; }
 
-#qchonon-panel input,
-#qchonon-panel button { font-family: inherit; }
-#qchonon-panel .q-count,
-#qchonon-panel #q-countdown,
-#qchonon-panel input.q-number { font-variant-numeric: tabular-nums; }
-#qchonon-panel .q-interval {
+#kqc-panel input,
+#kqc-panel button { font-family: inherit; }
+#kqc-panel .q-count,
+#kqc-panel #q-countdown,
+#kqc-panel input.q-number { font-variant-numeric: tabular-nums; }
+#kqc-panel .q-interval {
     display: inline-flex;
     align-items: center;
     gap: 5px;
 }
-#qchonon-panel input.q-number {
+#kqc-panel input.q-number {
     box-sizing: border-box;
     width: 58px;
     height: 24px;
@@ -547,11 +652,11 @@ html:root #resultTable tbody td.q-queue-cell {
     font-size: 12px;
     text-align: center;
 }
-#qchonon-panel input.q-number:focus { outline: none; border-color: var(--q-amber); }
+#kqc-panel input.q-number:focus { outline: none; border-color: var(--q-amber); }
 
-#qchonon-panel .q-switch { position: relative; display: inline-block; width: 38px; height: 20px; margin: 0; }
-#qchonon-panel .q-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
-#qchonon-panel .q-slider {
+#kqc-panel .q-switch { position: relative; display: inline-block; width: 38px; height: 20px; margin: 0; }
+#kqc-panel .q-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+#kqc-panel .q-slider {
     position: absolute;
     inset: 0;
     background: #b5b5b5;
@@ -559,7 +664,7 @@ html:root #resultTable tbody td.q-queue-cell {
     cursor: pointer;
     transition: background 0.2s;
 }
-#qchonon-panel .q-slider::before {
+#kqc-panel .q-slider::before {
     content: '';
     position: absolute;
     width: 14px;
@@ -570,8 +675,8 @@ html:root #resultTable tbody td.q-queue-cell {
     border-radius: 50%;
     transition: transform 0.2s;
 }
-#qchonon-panel .q-switch input:checked + .q-slider { background: #4f8cff; }
-#qchonon-panel .q-switch input:checked + .q-slider::before { transform: translateX(18px); }
+#kqc-panel .q-switch input:checked + .q-slider { background: #4f8cff; }
+#kqc-panel .q-switch input:checked + .q-slider::before { transform: translateX(18px); }
 
 /* ---------- UNIFIED CONTROLS (both themes) ---------- */
 html {
@@ -618,7 +723,7 @@ ${ui([
     'input[type="submit"]:active', 'input[type="button"]:active', 'button:active'
 ])} { transform: translateY(1px); }
 
-/* Top navigation tabs (State Report, Orders, POs, Proofs, ...) */
+/* Top navigation tabs */
 ${ui([
     '#nav a', '.nav a', 'ul.tabs a', '.tabs a', '.tab a', 'a.tab', 'td.tab a'
 ])} {
@@ -698,7 +803,7 @@ ${ui(['select[multiple] option:checked', 'select[size] option:checked'])} {
     color: var(--ql-primary-fg) !important;
 }
 
-/* select2 / chosen / jQuery UI dropdown widgets (the white "assignment" box) */
+/* select2 / chosen / jQuery UI dropdown widgets */
 ${ui([
     '.select2-container .select2-selection',
     '.select2-container--default .select2-selection--single',
@@ -722,7 +827,6 @@ ${ui([
 ])} { color: var(--qf-fg) !important; opacity: 1 !important; }
 ${ui(['.select2-selection__placeholder', '.chosen-default'])} { color: var(--qf-muted) !important; }
 
-/* Their popup lists */
 ${ui([
     '.select2-dropdown', '.chosen-drop', 'ul.ui-menu', '.ui-selectmenu-menu .ui-menu'
 ])} {
@@ -745,13 +849,11 @@ ${ui([
     border: 0 !important;
 }
 
-/* Disabled controls stay readable */
 ${ui(['select:disabled', 'input:disabled', 'button:disabled', '.select2-container--disabled .select2-selection'])} {
     opacity: 0.6;
     cursor: not-allowed;
 }
 
-/* Focus ring for everything */
 ${ui([
     'input[type="text"]:focus', 'input[type="number"]:focus', 'input[type="search"]:focus',
     'input:not([type]):focus', 'textarea:focus', 'select:focus', 'button:focus-visible'
@@ -761,7 +863,6 @@ ${ui([
     box-shadow: 0 0 0 3px var(--qf-focus) !important;
 }
 
-/* Checkboxes (Check All + row boxes) */
 ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     accent-color: var(--ql-primary-bg);
     cursor: pointer;
@@ -772,39 +873,37 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     function injectStyles() {
         const style = document.createElement('style');
 
-        style.id = 'qchonon-styles';
+        style.id = 'kqc-styles';
         style.textContent = buildCss();
 
-        // At document-start <head> may not exist yet.
         (document.head || document.documentElement).appendChild(style);
     }
 
     function applyTheme() {
-        document.documentElement.classList.toggle('q-dark', theme === 'dark');
+        document.documentElement.classList.toggle('q-dark', settings.theme === 'dark');
 
-        const panel = document.getElementById('qchonon-panel');
+        const panel = document.getElementById('kqc-panel');
 
         if (panel) {
-            panel.classList.toggle('q-light', theme === 'light');
+            panel.classList.toggle('q-light', settings.theme === 'light');
         }
 
         const toggle = document.getElementById('q-theme');
         const label = document.getElementById('q-theme-label');
+
         if (toggle) {
-            toggle.checked = theme === 'dark';
+            toggle.checked = settings.theme === 'dark';
         }
 
         if (label) {
-            label.textContent = theme === 'dark' ? 'Dark' : 'Light';
+            label.textContent = settings.theme === 'dark' ? 'Dark' : 'Light';
         }
     }
 
-    // Run right away so there is no white flash on each reload.
     injectStyles();
     applyTheme();
 
-    // Hide table rows until filtering has run. Removed in init, with a
-    // safety timer so rows can never stay hidden if something goes wrong.
+    // Hide table rows until filtering has run (safety timer included).
     document.documentElement.classList.add('q-pending');
     setTimeout(function () {
         document.documentElement.classList.remove('q-pending');
@@ -818,7 +917,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return String(text || '').replace(/\s+/g, ' ').trim();
     }
 
-    // Cleans a list of names: trims, drops empty ones and duplicates (any case).
     function cleanNames(list) {
         const seen = new Set();
         const out = [];
@@ -836,20 +934,13 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return out;
     }
 
-    // DA names: the list saved from the panel, or the starting list above.
     function loadDANames() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(DAS_KEY));
+        if (Array.isArray(settings.daNames)) {
+            const clean = cleanNames(settings.daNames);
 
-            if (Array.isArray(parsed)) {
-                const clean = cleanNames(parsed);
-
-                if (clean.length) {
-                    return clean;
-                }
+            if (clean.length) {
+                return clean;
             }
-        } catch (error) {
-            // fall through to the starting list
         }
 
         return cleanNames(ALLOWED_DAS);
@@ -857,21 +948,73 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
     let currentDAs = loadDANames();
 
-    // lowercase name -> name exactly as saved
     function buildAllowedMap() {
         return new Map(currentDAs.map((name) => [name.toLowerCase(), name]));
     }
 
     let allowedLower = buildAllowedMap();
 
+    // ---- Columns: found by header text, constants are the fallback ----
+    let COLS = { proof: COL_PROOF, queue: COL_QUEUE, state: COL_STATE, da: DA_COLUMNS.slice() };
+    let columnsLogged = false;
+
+    function detectColumns() {
+        const $table = $('#resultTable');
+        const headRow = $table.find('tr').filter(function () {
+            return $(this).children('th').length > 0;
+        }).first();
+        const firstDataRow = $table.find('tbody tr').filter(function () {
+            return $(this).children('td').length > 0;
+        }).first();
+
+        if (!headRow.length) {
+            return;
+        }
+
+        const heads = headRow.children('th, td').toArray()
+            .map((cell) => normalize(cell.textContent));
+
+        // If the header and the data rows do not line up, trust the constants.
+        if (firstDataRow.length && firstDataRow.children('td').length !== heads.length) {
+            return;
+        }
+
+        const found = { proof: 0, queue: 0, state: 0, da: [] };
+
+        heads.forEach((text, index) => {
+            const col = index + 1;
+
+            if (!found.proof && HEADER_PATTERNS.proof.test(text)) {
+                found.proof = col;
+            } else if (!found.queue && HEADER_PATTERNS.queue.test(text)) {
+                found.queue = col;
+            } else if (!found.state && HEADER_PATTERNS.state.test(text)) {
+                found.state = col;
+            } else if (HEADER_PATTERNS.da.some((re) => re.test(text))) {
+                found.da.push(col);
+            }
+        });
+
+        COLS = {
+            proof: found.proof || COL_PROOF,
+            queue: found.queue || COL_QUEUE,
+            state: found.state || COL_STATE,
+            da: found.da.length ? found.da : DA_COLUMNS.slice()
+        };
+
+        if (!columnsLogged) {
+            columnsLogged = true;
+            console.log('[Kapoy QC] Columns in use:', COLS);
+        }
+    }
+
     function cellText($row, column) {
         return normalize($row.children(`td:nth-child(${column})`).text());
     }
 
     function getMatchedDA($row) {
-        for (const column of DA_COLUMNS) {
+        for (const column of COLS.da) {
             const text = cellText($row, column);
-
             const match = allowedLower.get(text.toLowerCase());
 
             if (match) {
@@ -882,14 +1025,18 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         return '';
     }
 
-    // Color of a DA, by its position in the DA list.
+    function getQueueName($row) {
+        const text = cellText($row, COLS.queue).toLowerCase();
+
+        return QUEUE_TYPES.find((name) => text.includes(name.toLowerCase())) || '';
+    }
+
     function daColor(name) {
         const i = currentDAs.indexOf(name);
 
         return DA_COLORS[(i < 0 ? 0 : i) % DA_COLORS.length];
     }
 
-    // Color of a queue type (Standard / Wedding).
     function queueColor(name) {
         return QUEUE_COLORS[name] || QUEUE_FALLBACK_COLOR;
     }
@@ -900,106 +1047,86 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
     let seenProofs = loadSeen();
 
-    function loadSeen() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(SEEN_KEY));
+    function pruneSeen(map) {
+        const cutoff = Date.now() - SEEN_MAX_DAYS * 24 * 60 * 60 * 1000;
 
-            if (!parsed || typeof parsed !== 'object') {
-                return {};
+        Object.keys(map).forEach((id) => {
+            if (Number(map[id]) < cutoff) {
+                delete map[id];
             }
+        });
 
-            // Drop proofs not seen for SEEN_MAX_DAYS days (keeps the list small).
-            const cutoff = Date.now() - SEEN_MAX_DAYS * 24 * 60 * 60 * 1000;
-
-            Object.keys(parsed).forEach((id) => {
-                if (Number(parsed[id]) < cutoff) {
-                    delete parsed[id];
-                }
-            });
-
-            return parsed;
-        } catch (error) {
-            return {};
-        }
+        return map;
     }
 
-    function saveSeen() {
-        try {
-            localStorage.setItem(SEEN_KEY, JSON.stringify(seenProofs));
-        } catch (error) {
-            console.error('[Kapoy QC] Failed to save seen proofs:', error);
+    function loadSeen() {
+        const parsed = parseJSON(readStorage(SEEN_KEY));
+
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return {};
         }
+
+        return pruneSeen(parsed);
+    }
+
+    // Pruned on every save, so a tab that stays open for days stays small.
+    function saveSeen() {
+        pruneSeen(seenProofs);
+        writeStorage(SEEN_KEY, JSON.stringify(seenProofs));
     }
 
     // ============================================================
     // ASSIGNED TRACKER (+1 on the DA when you click "assign to me")
     // ============================================================
-    // EVERY "assign to me" click counts everywhere (duplicates included):
-    // the TOTAL, the per-DA count and the per-queue count all go up by 1,
-    // so clicking the same proof twice counts twice. Numbers start fresh
-    // every new day. The "Reset" button sets today's numbers back to 0.
-    //
-    // ALL-TIME: one running number that goes up by 1 for every click
-    // (duplicates included). It survives the daily reset and the Reset
-    // button. Only "Clear all" sets it back to 0.
-    // Shape: { since: 'YYYY-MM-DD', count: number }
+    // EVERY "assign to me" click counts (duplicates included): the total and
+    // the per-DA count go up by 1. Numbers start fresh every new day.
+    // Shape: { date: 'YYYY-MM-DD', byDA: { name: count }, total: number }
 
-    function dateKeyFrom(d) {
+    // Proofs you clicked "assign to me" on during this page session (row is dimmed).
+    const clickedProofs = new Set();
+
+    function todayKey() {
+        const d = new Date();
+
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     }
 
-    function todayKey() {
-        return dateKeyFrom(new Date());
-    }
-
     function newAssignedRecord() {
-        return { date: todayKey(), byDA: {}, byQueue: {}, proofs: [], total: 0 };
+        return { date: todayKey(), byDA: {}, total: 0 };
     }
 
-    function ensureAssignedShape(a) {
-        if (!a.byQueue || typeof a.byQueue !== 'object') {
-            a.byQueue = {};
+    function countOf(value) {
+        if (Array.isArray(value)) {
+            return value.length;
         }
 
-        // Unique proofs assigned today. Built from the old per-DA lists
-        // the first time, so today's existing count is kept.
-        if (!Array.isArray(a.proofs)) {
-            const all = new Set();
-
-            Object.keys(a.byDA).forEach((name) => {
-                (a.byDA[name] || []).forEach((id) => all.add(id));
-            });
-
-            a.proofs = Array.from(all);
-        }
-
-        // Total clicks today (duplicates included). Starts from the unique
-        // count the first time, so today's existing number is kept.
-        if (typeof a.total !== 'number') {
-            a.total = a.proofs.length;
-        }
-
-        return a;
+        return Number(value) || 0;
     }
 
     function loadAssigned() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(ASSIGNED_KEY));
+        const parsed = parseJSON(readStorage(ASSIGNED_KEY));
 
-            if (parsed && parsed.byDA && typeof parsed.byDA === 'object') {
-                if (parsed.date === todayKey()) {
-                    return ensureAssignedShape(parsed);
+        if (parsed && parsed.byDA && typeof parsed.byDA === 'object') {
+            if (parsed.date === todayKey()) {
+                // Old records stored lists of proof IDs: turn them into counts.
+                Object.keys(parsed.byDA).forEach((name) => {
+                    parsed.byDA[name] = countOf(parsed.byDA[name]);
+                });
+
+                if (typeof parsed.total !== 'number') {
+                    parsed.total = Object.keys(parsed.byDA)
+                        .reduce((sum, name) => sum + parsed.byDA[name], 0);
                 }
 
-                // A new day started: today's numbers start from 0.
-                const fresh = newAssignedRecord();
-
-                writeStorage(ASSIGNED_KEY, JSON.stringify(fresh));
-
-                return fresh;
+                return { date: parsed.date, byDA: parsed.byDA, total: parsed.total };
             }
-        } catch (error) {
-            // fall through to a fresh record
+
+            // A new day started: today's numbers start from 0.
+            const fresh = newAssignedRecord();
+
+            writeStorage(ASSIGNED_KEY, JSON.stringify(fresh));
+
+            return fresh;
         }
 
         return newAssignedRecord();
@@ -1012,144 +1139,22 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function assignedCount(name) {
-        return (assigned.byDA[name] || []).length;
-    }
-
-    function assignedTodayTotal() {
-        return assigned.total || 0;
-    }
-
-    function getQueueName($row) {
-        const text = cellText($row, COL_QUEUE).toLowerCase();
-
-        return QUEUE_TYPES.find((name) => text.includes(name.toLowerCase())) || '';
-    }
-
-    // Updates the Standard / Wedding rows: proofs showing now + assigned today.
-    function renderQueueCounts() {
-        const counts = {};
-
-        QUEUE_TYPES.forEach((name) => {
-            counts[name] = 0;
-        });
-
-        $('#resultTable tbody tr:visible').each(function () {
-            const name = getQueueName($(this));
-
-            if (name) {
-                counts[name]++;
-            }
-        });
-
-        document.querySelectorAll('#qchonon-panel .q-qshow').forEach((el) => {
-            const n = counts[el.dataset.q] || 0;
-
-            el.textContent = n;
-            el.classList.toggle('zero', n === 0);
-        });
-
-        document.querySelectorAll('#qchonon-panel .q-qassigned').forEach((el) => {
-            const n = ((assigned.byQueue || {})[el.dataset.q] || []).length;
-
-            el.textContent = n;
-            el.classList.toggle('zero', n === 0);
-        });
-    }
-
-    function loadAllTime() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(ALLTIME_KEY));
-
-            if (parsed && typeof parsed.count === 'number') {
-                return parsed;
-            }
-        } catch (error) {
-            // fall through
-        }
-
-        return null;
-    }
-
-    function saveAllTime(data) {
-        writeStorage(ALLTIME_KEY, JSON.stringify(data));
-    }
-
-    // Runs once at startup. First time on v2.0 it carries the old history
-    // total over (so the all-time number does not drop to 0), then deletes
-    // the old history data.
-    function initAllTime() {
-        if (!loadAllTime()) {
-            let count = 0;
-            let since = todayKey();
-
-            try {
-                const old = JSON.parse(localStorage.getItem(OLD_HISTORY_KEY));
-
-                if (old && old.totals && typeof old.totals === 'object') {
-                    count = Object.keys(old.totals)
-                        .reduce((sum, name) => sum + (Number(old.totals[name]) || 0), 0);
-
-                    if (old.since) {
-                        since = old.since;
-                    }
-                }
-            } catch (error) {
-                // no old history, start from 0
-            }
-
-            if (!count) {
-                count = assignedTodayTotal();
-            }
-
-            saveAllTime({ since: since, count: count });
-        }
-
-        try {
-            localStorage.removeItem(OLD_HISTORY_KEY);
-        } catch (error) {
-            // ignore
-        }
-    }
-
-    function formatSince(key) {
-        const parts = String(key || '').split('-').map(Number);
-
-        if (parts.length !== 3 || parts.some(Number.isNaN)) {
-            return '';
-        }
-
-        return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString([], {
-            month: 'short',
-            day: 'numeric',
-            year: 'numeric'
-        });
+        return countOf(assigned.byDA[name]);
     }
 
     function renderAssigned() {
-        document.querySelectorAll('#qchonon-panel .q-assigned').forEach((el) => {
+        document.querySelectorAll('#kqc-panel .q-assigned').forEach((el) => {
             const n = assignedCount(el.dataset.da);
 
             el.textContent = n;
             el.classList.toggle('zero', n === 0);
         });
 
-        renderQueueCounts();
-
-        const todayTotal = assignedTodayTotal();
         const todayEl = document.getElementById('q-total-today');
 
         if (todayEl) {
-            todayEl.textContent = todayTotal;
-            todayEl.classList.toggle('zero', todayTotal === 0);
-        }
-
-        const allTime = loadAllTime() || { since: todayKey(), count: 0 };
-        const allEl = document.getElementById('q-total-all');
-
-        if (allEl) {
-            allEl.textContent = allTime.count;
-            allEl.classList.toggle('zero', allTime.count === 0);
-            allEl.title = `All-time total since ${formatSince(allTime.since)}`;
+            todayEl.textContent = assigned.total;
+            todayEl.classList.toggle('zero', assigned.total === 0);
         }
     }
 
@@ -1158,50 +1163,31 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         assigned = loadAssigned();
 
         const $row = $link.closest('tr');
-        const proofID = cellText($row, COL_PROOF);
+        const proofID = cellText($row, COLS.proof);
 
         if (!proofID) {
             console.warn('[Kapoy QC] Assign clicked but no proof ID found.');
             return;
         }
 
-        // Every click counts everywhere (duplicates included):
-        // Total, All-time, per-DA and per-queue.
         assigned.total++;
-
-        const allTime = loadAllTime() || { since: todayKey(), count: 0 };
-
-        allTime.count++;
-        saveAllTime(allTime);
 
         const daName = getMatchedDA($row);
 
         if (daName) {
-            const daList = assigned.byDA[daName] || (assigned.byDA[daName] = []);
-
-            daList.push(proofID); // no duplicate check
-        }
-
-        const queueName = getQueueName($row);
-
-        if (queueName) {
-            const queueList = assigned.byQueue[queueName] || (assigned.byQueue[queueName] = []);
-
-            queueList.push(proofID); // no duplicate check
-        }
-
-        // Unique proof list (kept for compatibility, no longer affects any number).
-        if (!assigned.proofs.includes(proofID)) {
-            assigned.proofs.push(proofID);
+            assigned.byDA[daName] = assignedCount(daName) + 1;
         }
 
         saveAssigned();
         renderAssigned();
+
+        // Make the click visible, so an accidental double click is easy to spot.
+        clickedProofs.add(proofID);
+        $row.addClass('q-clicked');
     }
 
     function setupAssignTracking() {
-        // Capture phase on document: runs before the site's own handlers,
-        // so a stopPropagation() on the page can't hide the click from us.
+        // Capture phase on document: runs before the site's own handlers.
         function handle(event) {
             if (event.type === 'click' && event.button !== 0) {
                 return;
@@ -1227,7 +1213,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function setupAssignedReset() {
-        // Reset = today's assigned numbers back to 0.
         document.getElementById('q-reset-assigned').addEventListener('click', function () {
             if (!window.confirm("Reset today's assigned counts to 0?")) {
                 return;
@@ -1240,26 +1225,32 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         });
     }
 
-    // ============================================================
-    // FILTER + COUNT + ASSIGN LINKS + COLORS
-    // ============================================================
-
-    function filterRows() {
-        $('#resultTable tbody tr').each(function () {
-            const $row = $(this);
-
-            // Skip rows without data cells.
-            if (!$row.children('td').length) {
-                return;
+    // Other tabs changed something: keep this tab in sync.
+    function setupStorageSync() {
+        window.addEventListener('storage', function (event) {
+            if (event.key === ASSIGNED_KEY) {
+                assigned = loadAssigned();
+                renderAssigned();
+            } else if (event.key === SEEN_KEY) {
+                // Another tab already notified these proofs.
+                seenProofs = Object.assign(loadSeen(), seenProofs, loadSeen());
             }
-
-            $row.toggle(Boolean(getMatchedDA($row)));
         });
     }
 
-    // Colors each row by its DA (left bar + soft tint) and the Queue cell by
-    // its queue type. The DA name cells are left alone, so names stay white.
-    function colorRows() {
+    // ============================================================
+    // FILTER + COLOR + COUNT (ONE pass over the rows, no :visible queries)
+    // ============================================================
+
+    let tableStats = { total: 0, byDA: {} };
+
+    function applyTable() {
+        const stats = { total: 0, byDA: {} };
+
+        currentDAs.forEach((name) => {
+            stats.byDA[name] = 0;
+        });
+
         $('#resultTable tbody tr').each(function () {
             const $row = $(this);
 
@@ -1269,7 +1260,12 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
             const da = getMatchedDA($row);
 
+            $row.toggle(Boolean(da));
+
             if (da) {
+                stats.total++;
+                stats.byDA[da]++;
+
                 $row[0].style.setProperty('--q-da', daColor(da));
                 $row.addClass('q-colored');
             } else {
@@ -1277,7 +1273,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             }
 
             const queue = getQueueName($row);
-            const $queueCell = $row.children(`td:nth-child(${COL_QUEUE})`);
+            const $queueCell = $row.children(`td:nth-child(${COLS.queue})`);
 
             if (queue && $queueCell.length) {
                 $queueCell[0].style.setProperty('--q-queue', queueColor(queue));
@@ -1285,11 +1281,15 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             } else {
                 $queueCell.removeClass('q-queue-cell');
             }
+
+            $row.toggleClass('q-clicked', clickedProofs.has(cellText($row, COLS.proof)));
         });
+
+        tableStats = stats;
     }
 
     function updateCount() {
-        const count = $('#resultTable tbody tr:visible').length;
+        const count = tableStats.total;
 
         const level = LEVELS.find(
             (item) => count >= item.min && count <= item.max
@@ -1297,7 +1297,16 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
         $('div.warning')
             .text(level.message(count))
-            .css('color', theme === 'dark' ? level.darkColor : level.color);
+            .css('color', settings.theme === 'dark' ? level.darkColor : level.color);
+    }
+
+    function renderDACounts() {
+        document.querySelectorAll('#kqc-panel .q-show').forEach((el) => {
+            const n = tableStats.byDA[el.dataset.da] || 0;
+
+            el.textContent = n;
+            el.classList.toggle('zero', n === 0);
+        });
     }
 
     // Make every "assign to me" link open in a new tab.
@@ -1311,32 +1320,39 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     // ============================================================
-    // WINDOWS DESKTOP NOTIFICATIONS
+    // DESKTOP NOTIFICATIONS + SOUND
     // ============================================================
 
+    let permissionAsked = false;
+
+    // Chrome only shows the prompt reliably after a click / key press, so this
+    // is called from the first user gesture (and from the Settings button).
     function requestNotificationPermission() {
-        if (!('Notification' in window)) {
-            console.log('[Kapoy QC] Notifications are not supported.');
-            return;
+        if (!('Notification' in window) || Notification.permission !== 'default') {
+            return Promise.resolve();
         }
 
-        if (Notification.permission === 'default') {
-            Notification.requestPermission().catch((error) => {
-                console.error('[Kapoy QC] Permission error:', error);
-            });
-        }
+        permissionAsked = true;
+
+        return Notification.requestPermission().then(function () {
+            refreshNotifStatus();
+        }).catch((error) => {
+            console.error('[Kapoy QC] Permission error:', error);
+        });
     }
 
-    // ---- Beep (Web Audio, no sound file needed) ----
     let audioContext = null;
 
-    function setupSound() {
-        if (!NOTIFICATION_SOUND) {
-            return;
-        }
-
-        // Browsers block sound until the page got a click or key press.
+    function setupUserGesture() {
         function unlock() {
+            if (!permissionAsked) {
+                requestNotificationPermission();
+            }
+
+            if (!NOTIFICATION_SOUND) {
+                return;
+            }
+
             try {
                 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 
@@ -1369,7 +1385,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         try {
             const now = audioContext.currentTime;
 
-            // Two quick notes: a soft "ding-ding".
             [880, 1175].forEach((frequency, index) => {
                 const start = now + index * 0.16;
                 const oscillator = audioContext.createOscillator();
@@ -1397,23 +1412,18 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function notify(title, body, tag) {
-        if (!('Notification' in window)) {
-            return;
-        }
-
-        if (Notification.permission !== 'granted') {
+        if (!('Notification' in window) || Notification.permission !== 'granted') {
             return;
         }
 
         try {
             const notification = new Notification(title, {
                 body: body,
-                tag: tag, // same tag = the new popup replaces the old one
-                renotify: true, // still alert (sound/flash) when it replaces one
+                tag: tag,
+                renotify: true,
                 requireInteraction: NOTIFICATION_STAYS_UNTIL_DISMISSED
             });
 
-            // Windows may keep a popup in the Action Center, so close it ourselves.
             if (!NOTIFICATION_STAYS_UNTIL_DISMISSED) {
                 setTimeout(function () {
                     notification.close();
@@ -1433,7 +1443,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // NEW PROOF DETECTION
     // ============================================================
 
-    // Reads proofs of the allowed DAs from the given rows.
     function collectProofs($rows) {
         const proofs = [];
 
@@ -1445,7 +1454,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             }
 
             const daName = getMatchedDA($row);
-            const proofID = cellText($row, COL_PROOF);
+            const proofID = cellText($row, COLS.proof);
 
             if (!daName || !proofID) {
                 return;
@@ -1454,16 +1463,14 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             proofs.push({
                 proofID: proofID,
                 daName: daName,
-                queue: cellText($row, COL_QUEUE),
-                state: cellText($row, COL_STATE)
+                queue: cellText($row, COLS.queue),
+                state: cellText($row, COLS.state)
             });
         });
 
         return proofs;
     }
 
-    // One popup per batch: full details for a single proof, a short
-    // per-DA summary when several arrive at once.
     function notifyNewProofs(list) {
         if (list.length === 1) {
             const p = list[0];
@@ -1500,16 +1507,14 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
         const now = Date.now();
 
-        // "First run" is remembered in its own flag, so pruning old entries
-        // can never make the script think it is running for the first time.
-        const initialized =
-            readStorage(SEEN_INIT_KEY) === 'yes' ||
-            Object.keys(seenProofs).length > 0;
+        const initialized = settings.seenInit || Object.keys(seenProofs).length > 0;
 
-        writeStorage(SEEN_INIT_KEY, 'yes');
+        if (!settings.seenInit) {
+            settings.seenInit = true;
+            saveSettings();
+        }
 
-        // First run: treat everything currently shown as already seen,
-        // so there is no notification storm when the script first loads.
+        // First run: everything shown now counts as already seen.
         if (!initialized) {
             proofs.forEach((proof) => {
                 seenProofs[proof.proofID] = now;
@@ -1521,18 +1526,11 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
         const newProofs = proofs.filter((proof) => !seenProofs[proof.proofID]);
 
-        // One beep per batch of new proofs.
         if (newProofs.length) {
             beep();
-        }
-
-        // One grouped notification for the whole batch.
-        if (newProofs.length) {
             notifyNewProofs(newProofs);
         }
 
-        // Refresh the timestamp of every proof still on the page, so a proof
-        // that stays for days is not forgotten and notified a second time.
         proofs.forEach((proof) => {
             seenProofs[proof.proofID] = now;
         });
@@ -1541,7 +1539,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     // ============================================================
-    // STATUS PANEL (theme switch, reload interval, countdown, DA names)
+    // STATUS PANEL
     // ============================================================
 
     function escapeHtml(value) {
@@ -1551,37 +1549,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
-    }
-
-    function getDACounts() {
-        const counts = {};
-
-        currentDAs.forEach((name) => {
-            counts[name] = 0;
-        });
-
-        $('#resultTable tbody tr:visible').each(function () {
-            const daName = getMatchedDA($(this));
-
-            if (daName) {
-                counts[daName]++;
-            }
-        });
-
-        return counts;
-    }
-
-    function renderDACounts() {
-        const counts = getDACounts();
-
-        document.querySelectorAll('#qchonon-panel .q-show').forEach((el) => {
-            const n = counts[el.dataset.da] || 0;
-
-            el.textContent = n;
-            el.classList.toggle('zero', n === 0);
-        });
-
-        renderQueueCounts();
     }
 
     function setLastCheck(text) {
@@ -1600,19 +1567,46 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         });
     }
 
-    // Countdown state (shared so the interval box can reset it).
-    let remaining = reloadSeconds;
+    // Countdown state. A timestamp is used (not a decrementing counter), so a
+    // throttled background tab can never make the refresh slower than set.
+    let nextRefreshAt = Date.now() + settings.reloadSeconds * 1000;
     let intervalEditing = false;
     let namesEditing = false;
 
+    function resetTimer() {
+        nextRefreshAt = Date.now() + settings.reloadSeconds * 1000;
+    }
+
+    function refreshNotifStatus() {
+        const label = document.getElementById('q-notif-label');
+        const button = document.getElementById('q-notif-btn');
+
+        if (!label || !button) {
+            return;
+        }
+
+        if (!('Notification' in window)) {
+            label.textContent = 'Not supported';
+            button.hidden = true;
+            return;
+        }
+
+        const state = Notification.permission;
+
+        label.textContent = state === 'granted' ? 'Allowed'
+            : state === 'denied' ? 'Blocked (change in browser)'
+            : 'Not asked yet';
+        button.hidden = state !== 'default';
+    }
+
     function createPanel() {
-        if (document.getElementById('qchonon-panel')) {
+        if (document.getElementById('kqc-panel')) {
             return;
         }
 
         const panel = document.createElement('div');
 
-        panel.id = 'qchonon-panel';
+        panel.id = 'kqc-panel';
 
         panel.innerHTML = `
             <div class="q-head" id="q-head"><span>Kapoy QC</span><span class="q-tools"><button type="button" id="q-settings-btn" title="Settings">⚙</button><button type="button" id="q-collapse" title="Hide panel">▾</button><span class="q-grip">⋮⋮</span></span></div>
@@ -1647,9 +1641,16 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                         <span class="q-interval">
                             <input class="q-number" id="q-interval" type="number"
                                    min="${MIN_RELOAD_SECONDS}" max="${MAX_RELOAD_SECONDS}"
-                                   value="${reloadSeconds}">
+                                   value="${settings.reloadSeconds}">
                             <span>sec</span>
                         </span>
+                    </div>
+                    <div class="q-divider"></div>
+
+                    <div class="q-label">NOTIFICATIONS</div>
+                    <div class="q-row">
+                        <span>Status: <strong id="q-notif-label"></strong></span>
+                        <button type="button" class="q-btn" id="q-notif-btn">Enable</button>
                     </div>
                 </div>
 
@@ -1709,6 +1710,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         setupSettingsView(panel);
         setupIntervalInput();
         setupAutoToggle();
+        setupNotifButton();
         setupAssignedReset();
         setupNamesEditor();
         renderAssigned();
@@ -1718,26 +1720,26 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         makePanelDraggable(panel);
     }
 
-    // Draws the DA rows (name + showing + assigned) from the current list.
     function renderDAList() {
-        const counts = getDACounts();
-
         document.getElementById('q-das').innerHTML = currentDAs
-            .map((name) => `
+            .map((name) => {
+                const shown = tableStats.byDA[name] || 0;
+
+                return `
                 <div class="q-da" style="--q-rowcolor:${daColor(name)}">
                     <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
                     <span class="q-chips">
-                        <span class="q-count q-show ${counts[name] ? '' : 'zero'}" data-da="${escapeHtml(name)}" title="Proofs showing now">${counts[name]}</span>
+                        <span class="q-count q-show ${shown ? '' : 'zero'}" data-da="${escapeHtml(name)}" title="Proofs showing now">${shown}</span>
                         <span class="q-count q-assigned zero" data-da="${escapeHtml(name)}" title="Assigned to me today (duplicates included)">0</span>
                     </span>
                 </div>
-            `)
+            `;
+            })
             .join('');
 
         renderAssigned();
     }
 
-    // Edit the DA names from the panel (saved in the browser).
     function setupNamesEditor() {
         const editBtn = document.getElementById('q-edit-names');
         const editor = document.getElementById('q-names-editor');
@@ -1770,10 +1772,11 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
             currentDAs = names;
             allowedLower = buildAllowedMap();
-            writeStorage(DAS_KEY, JSON.stringify(names));
+            settings.daNames = names;
+            saveSettings();
 
-            // Proofs of newly added DAs that are already on the page should not
-            // fire "new proof" notifications, so mark them as seen first.
+            // Proofs of newly added DAs already on the page must not fire
+            // "new proof" notifications, so mark them as seen first.
             const now = Date.now();
 
             collectProofs($('#resultTable tbody tr')).forEach((proof) => {
@@ -1784,8 +1787,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
             saveSeen();
 
-            filterRows();
-            colorRows();
+            applyTable();
             updateCount();
             renderDAList();
             close();
@@ -1809,26 +1811,24 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         const toggle = document.getElementById('q-theme');
 
         toggle.addEventListener('change', function () {
-            theme = toggle.checked ? 'dark' : 'light';
+            settings.theme = toggle.checked ? 'dark' : 'light';
 
-            writeStorage(THEME_KEY, theme);
+            saveSettings();
             applyTheme();
-            updateCount(); // refresh message color for the new theme
+            updateCount();
         });
     }
 
-    // Hide / show the panel body (the title bar stays so you can bring it back).
     function applyCollapsed(panel) {
         const button = document.getElementById('q-collapse');
 
-        panel.classList.toggle('q-collapsed', collapsed);
+        panel.classList.toggle('q-collapsed', settings.collapsed);
 
         if (button) {
-            button.textContent = collapsed ? '▸' : '▾';
-            button.title = collapsed ? 'Show panel' : 'Hide panel';
+            button.textContent = settings.collapsed ? '▸' : '▾';
+            button.title = settings.collapsed ? 'Show panel' : 'Hide panel';
         }
 
-        // The panel height changed, so keep it fully on screen.
         const rect = panel.getBoundingClientRect();
 
         if (panel.style.left) {
@@ -1840,29 +1840,31 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         const button = document.getElementById('q-collapse');
 
         button.addEventListener('click', function () {
-            collapsed = !collapsed;
+            settings.collapsed = !settings.collapsed;
 
-            writeStorage(COLLAPSED_KEY, collapsed ? 'yes' : 'no');
+            saveSettings();
             applyCollapsed(panel);
         });
 
         applyCollapsed(panel);
     }
 
-    // Gear button: switch between the tracker and the Settings section, single total.
     function setupSettingsView(panel) {
         const button = document.getElementById('q-settings-btn');
         const back = document.getElementById('q-settings-back');
-        const settings = document.getElementById('q-settings');
+        const settingsView = document.getElementById('q-settings');
         const main = document.getElementById('q-main');
 
         function show(open) {
-            settings.hidden = !open;
+            settingsView.hidden = !open;
             main.hidden = open;
             button.classList.toggle('q-on', open);
             button.title = open ? 'Back to the tracker' : 'Settings';
 
-            // Panel height changed: keep it fully on screen.
+            if (open) {
+                refreshNotifStatus();
+            }
+
             const rect = panel.getBoundingClientRect();
 
             if (panel.style.left) {
@@ -1871,7 +1873,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         }
 
         button.addEventListener('click', function () {
-            show(settings.hidden);
+            show(settingsView.hidden);
         });
 
         back.addEventListener('click', function () {
@@ -1884,35 +1886,38 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         const label = document.getElementById('q-auto-label');
 
         function show() {
-            toggle.checked = autoReload;
-            label.textContent = autoReload ? 'On' : 'Off';
+            toggle.checked = settings.auto;
+            label.textContent = settings.auto ? 'On' : 'Off';
         }
 
         toggle.addEventListener('change', function () {
-            autoReload = toggle.checked;
+            settings.auto = toggle.checked;
 
-            writeStorage(AUTO_KEY, autoReload ? 'on' : 'off');
-
-            // Start a fresh countdown when it is turned back on.
-            remaining = reloadSeconds;
-
+            saveSettings();
+            resetTimer();
             show();
         });
 
         show();
     }
 
+    function setupNotifButton() {
+        document.getElementById('q-notif-btn').addEventListener('click', function () {
+            requestNotificationPermission();
+        });
+
+        refreshNotifStatus();
+    }
+
     function setupIntervalInput() {
         const input = document.getElementById('q-interval');
 
         function apply() {
-            reloadSeconds = clampSeconds(input.value);
+            settings.reloadSeconds = clampSeconds(input.value);
 
-            input.value = reloadSeconds;
-            writeStorage(RELOAD_KEY, String(reloadSeconds));
-
-            // Restart the countdown with the new value.
-            remaining = reloadSeconds;
+            input.value = settings.reloadSeconds;
+            saveSettings();
+            resetTimer();
         }
 
         input.addEventListener('focus', function () {
@@ -1934,7 +1939,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     // ============================================================
-    // DRAGGING (position is saved, so it survives page reloads)
+    // DRAGGING (pointer events: mouse, touch and pen; position is saved)
     // ============================================================
 
     let panelDragging = false;
@@ -1958,32 +1963,16 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     function restorePanelPosition(panel) {
-        try {
-            const saved = JSON.parse(localStorage.getItem(POSITION_KEY));
-
-            if (
-                saved &&
-                typeof saved.left === 'number' &&
-                typeof saved.top === 'number'
-            ) {
-                placePanel(panel, saved.left, saved.top);
-            }
-        } catch (error) {
-            console.error('[Kapoy QC] Failed to restore position:', error);
+        if (settings.position) {
+            placePanel(panel, settings.position.left, settings.position.top);
         }
     }
 
     function savePanelPosition(panel) {
         const rect = panel.getBoundingClientRect();
 
-        try {
-            localStorage.setItem(
-                POSITION_KEY,
-                JSON.stringify({ left: rect.left, top: rect.top })
-            );
-        } catch (error) {
-            console.error('[Kapoy QC] Failed to save position:', error);
-        }
+        settings.position = { left: rect.left, top: rect.top };
+        saveSettings();
     }
 
     function makePanelDraggable(panel) {
@@ -1996,7 +1985,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         let offsetX = 0;
         let offsetY = 0;
 
-        handle.addEventListener('mousedown', function (event) {
+        handle.addEventListener('pointerdown', function (event) {
             if (event.button !== 0 || event.target.closest('button')) {
                 return;
             }
@@ -2009,10 +1998,16 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
             placePanel(panel, rect.left, rect.top);
 
+            try {
+                handle.setPointerCapture(event.pointerId);
+            } catch (error) {
+                // not critical
+            }
+
             event.preventDefault();
         });
 
-        document.addEventListener('mousemove', function (event) {
+        handle.addEventListener('pointermove', function (event) {
             if (!panelDragging) {
                 return;
             }
@@ -2020,16 +2015,18 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             placePanel(panel, event.clientX - offsetX, event.clientY - offsetY);
         });
 
-        document.addEventListener('mouseup', function () {
+        function stop() {
             if (!panelDragging) {
                 return;
             }
 
             panelDragging = false;
             savePanelPosition(panel);
-        });
+        }
 
-        // Keep the panel on screen if the window gets smaller.
+        handle.addEventListener('pointerup', stop);
+        handle.addEventListener('pointercancel', stop);
+
         window.addEventListener('resize', function () {
             const rect = panel.getBoundingClientRect();
 
@@ -2038,13 +2035,12 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     // ============================================================
-    // AUTO RELOAD (full page reload with visible countdown)
+    // REFRESH (background merge or full reload)
     // ============================================================
 
-    // Re-runs everything that depends on the table after its rows changed.
     function applyRefreshedTable() {
-        filterRows();
-        colorRows();
+        detectColumns();
+        applyTable();
         updateCount();
         openAssignInNewTab();
 
@@ -2058,29 +2054,64 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         setLastCheck(`Last check: ${formatTime(new Date())}`);
     }
 
+    function rowProofId(tr) {
+        const cell = tr.children[COLS.proof - 1];
+
+        return cell && cell.tagName === 'TD' ? normalize(cell.textContent) : '';
+    }
+
+    function rowSignature(tr) {
+        const links = Array.from(tr.querySelectorAll('a'))
+            .map((a) => a.getAttribute('href') || '')
+            .join('|');
+
+        return `${normalize(tr.textContent)}||${links}`;
+    }
+
+    // Keeps the rows that did not change (same DOM nodes, so any handler the
+    // site attached to them survives) and only brings in new / changed rows.
+    function mergeRows(liveBody, freshBody) {
+        const liveMap = new Map();
+
+        Array.from(liveBody.rows).forEach((tr) => {
+            const id = rowProofId(tr);
+
+            if (id && !liveMap.has(id)) {
+                liveMap.set(id, tr);
+            }
+        });
+
+        const fragment = document.createDocumentFragment();
+
+        Array.from(freshBody.rows).forEach((freshRow) => {
+            const id = rowProofId(freshRow);
+            const liveRow = id ? liveMap.get(id) : null;
+
+            if (liveRow && rowSignature(liveRow) === rowSignature(freshRow)) {
+                liveMap.delete(id);
+                fragment.appendChild(liveRow);
+            } else {
+                fragment.appendChild(document.importNode(freshRow, true));
+            }
+        });
+
+        // Rows still left in the old body (gone from the server) are dropped.
+        liveBody.replaceChildren(fragment);
+    }
+
     let refreshing = false;
 
-    // Downloads the page in the background and swaps only the table rows.
-    // No page reload: scroll position, selections and the panel stay as they are.
     async function backgroundRefresh() {
         if (refreshing) {
             return;
         }
 
-        // No table on this page right now: fall back to a normal reload.
         if (!document.querySelector('#resultTable tbody')) {
             window.location.reload();
             return;
         }
 
         refreshing = true;
-
-        const label = document.getElementById('q-countdown');
-
-        if (label) {
-            label.textContent = 'Refreshing...';
-            label.className = '';
-        }
 
         const controller = new AbortController();
         const timer = setTimeout(function () {
@@ -2094,7 +2125,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 signal: controller.signal
             });
 
-            // Logged out / no access: a normal reload shows the login page.
             if (response.status === 401 || response.status === 403) {
                 window.location.reload();
                 return;
@@ -2108,8 +2138,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             const doc = new DOMParser().parseFromString(html, 'text/html');
             const fresh = doc.querySelector('#resultTable tbody');
 
-            // No results table in the answer = most likely the login page
-            // (session expired). Reload so you see it instead of stale data.
+            // No results table = most likely the login page (session expired).
             if (!fresh) {
                 window.location.reload();
                 return;
@@ -2127,8 +2156,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 return;
             }
 
-            live.replaceWith(document.importNode(fresh, true));
-
+            mergeRows(live, fresh);
             applyRefreshedTable();
         } catch (error) {
             console.error('[Kapoy QC] Background refresh failed:', error);
@@ -2145,64 +2173,102 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             $('#resultTable tbody input[type="checkbox"]:checked').length > 0;
     }
 
-    function startCountdown() {
-        remaining = reloadSeconds;
-
+    function tick() {
         const label = document.getElementById('q-countdown');
 
-        function render() {
-            if (!label) {
-                return;
-            }
-
-            if (!autoReload) {
-                label.textContent = 'Off';
-                label.className = 'paused';
-            } else if (panelDragging) {
-                label.textContent = 'Paused (moving)';
-                label.className = 'paused';
-            } else if (intervalEditing || namesEditing) {
-                label.textContent = 'Paused (editing)';
-                label.className = 'paused';
-            } else if (isSelectionActive()) {
-                label.textContent = 'Paused (selected)';
-                label.className = 'paused';
-            } else {
-                label.textContent = `${remaining}s`;
-                label.className = '';
+        function show(text, paused) {
+            if (label) {
+                label.textContent = text;
+                label.className = paused ? 'paused' : '';
             }
         }
 
-        render();
+        if (!settings.auto) {
+            resetTimer();
+            show('Off', true);
+            return;
+        }
 
-        setInterval(function () {
-            if (!autoReload || panelDragging || intervalEditing || namesEditing || isSelectionActive()) {
-                // Keep the countdown at full while off, dragging, editing or selecting.
-                remaining = reloadSeconds;
-                render();
-                return;
-            }
+        if (panelDragging) {
+            resetTimer();
+            show('Paused (moving)', true);
+            return;
+        }
 
-            remaining--;
+        if (intervalEditing || namesEditing) {
+            resetTimer();
+            show('Paused (editing)', true);
+            return;
+        }
 
-            if (remaining <= 0) {
-                remaining = reloadSeconds;
+        if (isSelectionActive()) {
+            resetTimer();
+            show('Paused (selected)', true);
+            return;
+        }
 
-                if (USE_BACKGROUND_REFRESH) {
-                    backgroundRefresh();
-                    return;
+        if (refreshing) {
+            show('Refreshing...', false);
+            return;
+        }
+
+        const remaining = Math.ceil((nextRefreshAt - Date.now()) / 1000);
+
+        if (remaining > 0) {
+            show(`${remaining}s`, false);
+            return;
+        }
+
+        resetTimer();
+
+        if (USE_BACKGROUND_REFRESH) {
+            show('Refreshing...', false);
+            backgroundRefresh();
+            return;
+        }
+
+        show('Reloading...', false);
+        window.location.reload();
+    }
+
+    // The tick comes from an inline Web Worker, because browsers slow down
+    // timers on the main thread in hidden tabs. If workers are blocked by the
+    // page, it falls back to a normal setInterval.
+    function startTicker() {
+        resetTimer();
+        tick();
+
+        let usingWorker = false;
+
+        function fallback() {
+            setInterval(tick, 1000);
+        }
+
+        try {
+            const blob = new Blob(
+                ['setInterval(function(){postMessage(0);},1000);'],
+                { type: 'application/javascript' }
+            );
+            const url = URL.createObjectURL(blob);
+            const worker = new Worker(url);
+
+            usingWorker = true;
+
+            worker.onmessage = tick;
+            worker.onerror = function () {
+                worker.terminate();
+
+                if (usingWorker) {
+                    usingWorker = false;
+                    fallback();
                 }
+            };
+        } catch (error) {
+            fallback();
+        }
 
-                if (label) {
-                    label.textContent = 'Reloading...';
-                }
-
-                window.location.reload();
-                return;
-            }
-
-            render();
-        }, 1000);
+        // Catch up right away when you come back to the tab.
+        document.addEventListener('visibilitychange', tick);
     }
 
     // ============================================================
@@ -2210,7 +2276,6 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // ============================================================
 
     $(function () {
-        // Each step is isolated: if one fails, the others still run.
         function safe(name, fn) {
             try {
                 fn();
@@ -2219,11 +2284,8 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             }
         }
 
-        // Sets up the all-time total (carries over the old history total once).
-        safe('all-time total', initAllTime);
-
-        safe('filter rows', filterRows);
-        safe('color rows', colorRows);
+        safe('columns', detectColumns);
+        safe('filter rows', applyTable);
 
         // Rows are filtered now, so they can be shown.
         document.documentElement.classList.remove('q-pending');
@@ -2231,16 +2293,15 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         safe('count', updateCount);
         safe('assign links', openAssignInNewTab);
         safe('assign tracking', setupAssignTracking);
-        safe('notification permission', requestNotificationPermission);
-        safe('sound', setupSound);
+        safe('storage sync', setupStorageSync);
+        safe('user gesture', setupUserGesture);
 
-        // Compare the proofs on this page load with the ones seen before.
         safe('new proofs', function () {
             checkForNewProofs(collectProofs($('#resultTable tbody tr')));
         });
 
         safe('panel', createPanel);
-        safe('countdown', startCountdown);
+        safe('ticker', startTicker);
     });
 
 })(jQuery);
