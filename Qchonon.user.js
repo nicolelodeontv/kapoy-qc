@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.3.1
 // @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -21,7 +21,7 @@
         return;
     }
 
-    const VERSION = '3.3';
+    const VERSION = '3.3.1';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -34,14 +34,8 @@
     }
 
     const CHANGELOG = [
-        'Tab title + icon badge with the proof count',
-        'Proof age labels, stale tint, optional oldest-first / Wedding-first sort',
-        'Detects proofs that left the list (yours vs others) + Confirmed count',
-        'Stale-data warning and refresh backoff',
-        'Per-DA mute, quiet hours, volume, sound switch',
-        'Click a DA to filter. Alt+K hide/show, Alt+P pause',
-        '30-day history (CSV), settings export / import',
-        'jQuery removed'
+        'Whole page matches the panel: table header, rows, age pills, one text size',
+        'Panel always fits the window and scrolls instead of being cut off'
     ];
 
     // ============================================================
@@ -508,17 +502,69 @@ html:root #resultTable tbody td.q-queue-cell {
     color: var(--q-queue) !important;
 }
 
-/* ---------- AGE LABEL (after the Proof ID) + STALE TINT ---------- */
-html:root #resultTable tbody td[data-q-age]::after {
-    content: " \\00B7 " attr(data-q-age);
-    font-size: 11px;
-    font-weight: 600;
-    opacity: 0.75;
+/* ---------- TABLE + PAGE TEXT (matches the panel and the controls) ---------- */
+html {
+    --qt-head-bg: #eef1f6; --qt-head-fg: #5b6573; --qt-row: #f6f8fb;
+    --qt-row-hover: #eaf0fa; --qt-chip: #e3e8f0;
+}
+html.q-dark {
+    --qt-head-bg: #1d2230; --qt-head-fg: #9aa4b2; --qt-row: #1b1b1b;
+    --qt-row-hover: #272727; --qt-chip: #2a2f3a;
+}
+/* Page text: one size (13px) like the controls; things with their own size keep it */
+html:root body > div:not(#kqc-panel) { font-size: 13px; }
+html:root div.warning { font-size: 13px; margin: 8px 0; }
+
+html:root body table#resultTable { border-collapse: separate; border-spacing: 0 4px; }
+html:root body table#resultTable tr:has(> th) { background: var(--qt-head-bg); }
+html:root body table#resultTable th {
+    padding: 9px 10px !important;
+    border: 0 !important;
+    color: var(--qt-head-fg) !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    text-align: left;
+    vertical-align: middle;
+}
+html:root body table#resultTable th:first-child { border-radius: 8px 0 0 8px; }
+html:root body table#resultTable th:last-child { border-radius: 0 8px 8px 0; }
+
+html:root body table#resultTable tbody td {
+    padding: 8px 10px;
+    border: 0 !important;
+    font-size: 12px;
+    vertical-align: middle;
+}
+html:root body table#resultTable tbody td:first-child { border-radius: 8px 0 0 8px; }
+html:root body table#resultTable tbody td:last-child { border-radius: 0 8px 8px 0; }
+html:root:not(.q-dark) body table#resultTable tbody td { background-color: var(--qt-row); }
+html:root:not(.q-dark) body table#resultTable tbody tr:hover td { background-color: var(--qt-row-hover); }
+
+/* Age pill under the Proof ID + stale tint */
+html:root body table#resultTable tbody td[data-q-age]::after {
+    content: attr(data-q-age);
+    display: block;
+    width: max-content;
+    margin: 4px 0 0;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--qt-chip);
+    color: var(--qt-head-fg);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.5;
     white-space: nowrap;
 }
-html:root #resultTable tbody tr.q-stale td[data-q-age]::after { color: #e08a00; opacity: 1; }
-html:root #resultTable tbody tr.q-very-stale td[data-q-age]::after { color: #ef5350; opacity: 1; }
-html:root #resultTable tbody tr.q-very-stale td { border-bottom-color: #ef5350 !important; }
+html:root body table#resultTable tbody tr.q-stale td[data-q-age]::after {
+    background: color-mix(in srgb, #e08a00 22%, transparent);
+    color: #e08a00;
+}
+html:root body table#resultTable tbody tr.q-very-stale td[data-q-age]::after {
+    background: color-mix(in srgb, #ef5350 22%, transparent);
+    color: #ef5350;
+}
 
 /* ---------- PANEL ---------- */
 #kqc-panel {
@@ -785,7 +831,7 @@ html:root #resultTable tbody tr.q-very-stale td { border-bottom-color: #ef5350 !
     border-radius: 5px;
     font-size: 11px;
 }
-#kqc-panel .q-body { max-height: calc(100vh - 70px); overflow-y: auto; }
+#kqc-panel .q-body { max-height: var(--q-maxh, calc(100vh - 70px)); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--q-border) transparent; }
 
 /* ---------- UNIFIED CONTROLS (both themes) ---------- */
 html {
@@ -2335,6 +2381,19 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         applyTheme();
         restorePanelPosition(panel);
         makePanelDraggable(panel);
+
+        // Keep it fitting when its content grows (Settings, editor) or the window changes.
+        fitPanel(panel);
+
+        if ('ResizeObserver' in window) {
+            new ResizeObserver(function () {
+                fitPanel(panel);
+            }).observe(panel);
+        }
+
+        window.addEventListener('resize', function () {
+            fitPanel(panel);
+        });
     }
 
     function setupNews() {
@@ -2791,6 +2850,21 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         panel.style.left = `${pos.left}px`;
         panel.style.top = `${pos.top}px`;
         panel.style.right = 'auto';
+
+        fitPanel(panel);
+    }
+
+    // The panel body scrolls instead of being cut off: its max height is
+    // whatever room is left between the panel top and the window bottom.
+    function fitPanel(panel) {
+        const head = panel.querySelector('.q-head');
+        const top = panel.getBoundingClientRect().top;
+        const room = window.innerHeight - top - (head ? head.offsetHeight : 40) - 16;
+        const value = `${Math.max(160, Math.floor(room))}px`;
+
+        if (panel.style.getPropertyValue('--q-maxh') !== value) {
+            panel.style.setProperty('--q-maxh', value);
+        }
     }
 
     function restorePanelPosition(panel) {
