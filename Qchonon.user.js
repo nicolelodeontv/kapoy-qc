@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3.1
+// @version      3.3.2
 // @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -21,7 +21,7 @@
         return;
     }
 
-    const VERSION = '3.3.1';
+    const VERSION = '3.3.2';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -34,6 +34,7 @@
     }
 
     const CHANGELOG = [
+        'Assignment dropdown popup is no longer see-through (select2 styled for both themes)',
         'Whole page matches the panel: table header, rows, age pills, one text size',
         'Panel always fits the window and scrolls instead of being cut off'
     ];
@@ -369,9 +370,11 @@
         return list.map((s) => `${ANY} ${s}`).join(',\n');
     }
 
+    const POP = 'html:root body > .select2-drop:not(#kqc-panel)';
+
     function buildCss() {
         const transparentBg = [
-            'html.q-dark body > div:not(#kqc-panel)',
+            'html.q-dark body > div:not(#kqc-panel):not(.select2-drop):not(.chosen-drop):not(.ui-front)',
             within(['div', 'form', 'fieldset', 'section', 'footer'])
         ].join(',\n');
 
@@ -1003,6 +1006,44 @@ ${ui([
     color: var(--ql-primary-fg) !important;
     border: 0 !important;
 }
+
+/* select2 v3: the "assignment" box and its popup (the popup sits directly under <body>) */
+${ui([
+    '.select2-container .select2-choice',
+    '.select2-container-multi .select2-choices'
+])} {
+    min-height: 28px;
+    border: 1px solid var(--ql-border) !important;
+    border-radius: 6px !important;
+    background: var(--qf-bg) !important;
+    background-image: none !important;
+    color: var(--qf-fg) !important;
+    box-shadow: none !important;
+}
+${ui(['.select2-container .select2-choice .select2-chosen'])} { color: var(--qf-fg) !important; }
+${ui(['.select2-container .select2-choice .select2-arrow'])} {
+    background: transparent !important;
+    border: 0 !important;
+}
+html.q-dark .select2-container .select2-choice .select2-arrow b { filter: invert(1) brightness(1.3); }
+
+${POP} {
+    background: var(--qf-bg) !important;
+    border: 1px solid var(--ql-border) !important;
+    border-radius: 6px !important;
+    color: var(--qf-fg) !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35) !important;
+}
+${POP} .select2-results { background: transparent !important; }
+${POP} .select2-results .select2-result-label,
+${POP} .select2-results .select2-no-results,
+${POP} .select2-results .select2-searching { color: var(--qf-fg) !important; background: transparent !important; }
+${POP} .select2-results .select2-highlighted,
+${POP} .select2-results .select2-highlighted .select2-result-label {
+    background: var(--ql-primary-bg) !important;
+    color: var(--ql-primary-fg) !important;
+}
+${POP} .select2-results .select2-disabled { opacity: 0.5; }
 
 ${ui(['select:disabled', 'input:disabled', 'button:disabled', '.select2-container--disabled .select2-selection'])} {
     opacity: 0.6;
