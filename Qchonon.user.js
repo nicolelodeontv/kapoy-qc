@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3.2
+// @version      3.3.3
 // @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -21,7 +21,7 @@
         return;
     }
 
-    const VERSION = '3.3.2';
+    const VERSION = '3.3.3';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -34,9 +34,9 @@
     }
 
     const CHANGELOG = [
-        'Assignment dropdown popup is no longer see-through (select2 styled for both themes)',
-        'Whole page matches the panel: table header, rows, age pills, one text size',
-        'Panel always fits the window and scrolls instead of being cut off'
+        'Results table is centered in the window',
+        'Assignment dropdown popup is no longer see-through',
+        'Page styling matches the panel; panel scrolls instead of being cut off'
     ];
 
     // ============================================================
@@ -3243,6 +3243,52 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         });
     }
 
+    // ============================================================
+    // CENTER THE RESULTS TABLE (it is wider than the page column)
+    // ============================================================
+
+    function centerTable() {
+        const table = $q('#resultTable');
+
+        if (!table) {
+            return;
+        }
+
+        // Measure from its natural position, then shift it to the window center.
+        table.style.transform = '';
+
+        const rect = table.getBoundingClientRect();
+        const view = document.documentElement.clientWidth;
+        const pageLeft = rect.left + window.scrollX;
+        let dx = (view - rect.width) / 2 - pageLeft;
+
+        // Never push the left edge off-screen (a wider table scrolls to the right).
+        if (pageLeft + dx < 8) {
+            dx = 8 - pageLeft;
+        }
+
+        if (Math.abs(dx) >= 1) {
+            table.style.transform = `translateX(${Math.round(dx)}px)`;
+        }
+    }
+
+    function setupTableCentering() {
+        const table = $q('#resultTable');
+
+        if (!table) {
+            return;
+        }
+
+        centerTable();
+
+        window.addEventListener('resize', centerTable);
+
+        // Rows with different content change the table width: center again.
+        if ('ResizeObserver' in window) {
+            new ResizeObserver(centerTable).observe(table);
+        }
+    }
+
     function setupNetworkEvents() {
         window.addEventListener('offline', updateHealth);
 
@@ -3362,6 +3408,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         safe('shortcuts', setupShortcuts);
         safe('network', setupNetworkEvents);
         safe('ticker', startTicker);
+        safe('center table', setupTableCentering);
     });
 
 })();
