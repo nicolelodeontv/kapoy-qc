@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3.3
+// @version      3.3.4
 // @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -21,7 +21,7 @@
         return;
     }
 
-    const VERSION = '3.3.3';
+    const VERSION = '3.3.4';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -34,9 +34,9 @@
     }
 
     const CHANGELOG = [
+        'Sorted (green) header text is always readable',
         'Results table is centered in the window',
-        'Assignment dropdown popup is no longer see-through',
-        'Page styling matches the panel; panel scrolls instead of being cut off'
+        'Assignment dropdown popup is no longer see-through'
     ];
 
     // ============================================================
@@ -511,7 +511,7 @@ html {
     --qt-row-hover: #eaf0fa; --qt-chip: #e3e8f0;
 }
 html.q-dark {
-    --qt-head-bg: #1d2230; --qt-head-fg: #9aa4b2; --qt-row: #1b1b1b;
+    --qt-head-bg: #1d2230; --qt-head-fg: #b9c2cf; --qt-row: #1b1b1b;
     --qt-row-hover: #272727; --qt-chip: #2a2f3a;
 }
 /* Page text: one size (13px) like the controls; things with their own size keep it */
@@ -1744,6 +1744,25 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         }
 
         sorted.forEach((item) => tbody.appendChild(item.row));
+    }
+
+    // Header cells that carry their own background (the green sorted column)
+    // get dark or white text, whichever is readable on that color.
+    function fixHeaderContrast() {
+        $$('#resultTable th').forEach((th) => {
+            const nums = (getComputedStyle(th).backgroundColor.match(/[\d.]+/g) || []).map(parseFloat);
+            const alpha = nums.length > 3 ? nums[3] : 1;
+
+            if (nums.length < 3 || alpha < 0.2) {
+                th.style.removeProperty('color');
+                return;
+            }
+
+            const lum = (0.299 * nums[0] + 0.587 * nums[1] + 0.114 * nums[2]) / 255;
+
+            th.style.setProperty('color', lum > 0.6 ? '#1b1b1b' : '#ffffff', 'important');
+            th.style.borderRadius = '6px';
+        });
     }
 
     function updateCount() {
@@ -2981,6 +3000,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     function applyRefreshedTable() {
         refreshColumns();
         applyTable();
+        fixHeaderContrast();
         detectGone();
         updateCount();
         openAssignInNewTab();
@@ -3386,6 +3406,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
 
         safe('columns', refreshColumns);
         safe('filter rows', applyTable);
+        safe('header contrast', fixHeaderContrast);
 
         // Rows are filtered now, so they can be shown.
         document.documentElement.classList.remove('q-pending');
