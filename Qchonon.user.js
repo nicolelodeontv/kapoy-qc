@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3.5
-// @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, no jQuery
+// @version      3.3.6
+// @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, update popup, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
 // @downloadURL  https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -22,7 +22,7 @@
     }
 
     // Keep in sync with @version above.
-    const VERSION = '3.3.5';
+    const VERSION = '3.3.6';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -35,9 +35,9 @@
     }
 
     const CHANGELOG = [
+        'Popup when a new version is available (Update now / Later / Skip)',
         'DA name changes now sync to your other open tabs',
         'Proofs that leave and come back alert again',
-        'An empty refresh result no longer counts as "everything left"',
         'Refresh pauses while a dropdown or field is in use'
     ];
 
@@ -124,6 +124,13 @@
 
     const SEEN_MAX_DAYS = 7;
     const HISTORY_DAYS = 30;
+
+    // Update popup: the script reads the @version line of this file and shows
+    // a popup when it is newer than VERSION. "Update now" opens this URL and
+    // Tampermonkey shows its install page.
+    const UPDATE_URL = 'https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js';
+    const UPDATE_CHECK_HOURS = 6;
+    const UPDATE_CHECK_TIMEOUT_MS = 15000;
 
     const SETTINGS_KEY = 'KapoyQC_Settings';
     const SEEN_KEY = 'KapoyQC_Seen';
@@ -239,7 +246,8 @@
             quietTo: '06:00',
             mutedDAs: [],
             history: [],
-            lastVersion: ''
+            lastVersion: '',
+            dismissedUpdate: ''
         };
     }
 
@@ -297,6 +305,10 @@
 
         if (typeof p.lastVersion === 'string') {
             s.lastVersion = p.lastVersion;
+        }
+
+        if (typeof p.dismissedUpdate === 'string') {
+            s.dismissedUpdate = p.dismissedUpdate;
         }
 
         return s;
@@ -842,6 +854,32 @@ html:root body table#resultTable tbody tr.q-very-stale td[data-q-age]::after {
     font-size: 11px;
 }
 #kqc-panel .q-body { max-height: var(--q-maxh, calc(100vh - 70px)); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--q-border) transparent; }
+
+/* ---------- UPDATE POPUP ---------- */
+#kqc-panel .q-update {
+    position: fixed;
+    inset: 0;
+    z-index: 1000000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.55);
+}
+#kqc-panel .q-update-box {
+    box-sizing: border-box;
+    width: 320px;
+    max-width: 90vw;
+    padding: 16px;
+    background: var(--q-bg);
+    color: var(--q-text);
+    border: 1px solid var(--q-border);
+    border-radius: 10px;
+    box-shadow: 0 8px 30px var(--q-shadow);
+    font-size: 13px;
+    white-space: normal;
+}
+#kqc-panel .q-update-box .q-note { font-size: 12px; margin: 6px 0 12px; }
+#kqc-panel .q-update-box .q-foot-btns { flex-wrap: wrap; }
 
 /* ---------- UNIFIED CONTROLS (both themes) ---------- */
 html {
@@ -1625,6 +1663,15 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                     focusDA = '';
                 }
 
+                // "Skip this version" clicked in another tab: close the popup here too.
+                if (settings.dismissedUpdate) {
+                    const popup = $q('#q-update');
+
+                    if (popup && popup.dataset.version === settings.dismissedUpdate) {
+                        popup.remove();
+                    }
+                }
+
                 applyTheme();
                 applyTable();
                 previousIds = tableStats.ids; // a changed DA list is not "proofs left"
@@ -2218,6 +2265,115 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     }
 
     // ============================================================
+    // UPDATE POPUP (checks the @version line of the file on GitHub)
+    // ============================================================
+
+    // Returns 1 if a is newer than b, -1 if older, 0 if the same.
+    function compareVersions(a, b) {
+        const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+        const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+
+        for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+            const diff = (pa[i] || 0) - (pb[i] || 0);
+
+            if (diff) {
+                return diff > 0 ? 1 : -1;
+            }
+        }
+
+        return 0;
+    }
+
+    function showUpdatePopup(latest) {
+        const panel = $q('#kqc-panel');
+
+        // Lives inside the panel so the dark-theme page rules do not restyle it.
+        if (!panel || $q('#q-update')) {
+            return;
+        }
+
+        const box = document.createElement('div');
+
+        box.id = 'q-update';
+        box.className = 'q-update';
+        box.dataset.version = latest;
+        box.innerHTML = `
+            <div class="q-update-box" role="dialog" aria-label="Kapoy QC update available">
+                <strong>Kapoy QC update available</strong>
+                <div class="q-note">Version ${escapeHtml(latest)} is out. You have ${escapeHtml(VERSION)}.</div>
+                <div class="q-foot-btns q-editor-btns">
+                    <button type="button" class="q-btn" id="q-update-skip">Skip this version</button>
+                    <button type="button" class="q-btn" id="q-update-later">Later</button>
+                    <button type="button" class="q-btn q-save" id="q-update-now">Update now</button>
+                </div>
+            </div>`;
+
+        panel.appendChild(box);
+
+        $q('#q-update-later').addEventListener('click', function () {
+            box.remove();
+        });
+
+        $q('#q-update-skip').addEventListener('click', function () {
+            settings.dismissedUpdate = latest;
+            saveSettings();
+            box.remove();
+        });
+
+        $q('#q-update-now').addEventListener('click', function () {
+            // Tampermonkey opens its install page for .user.js URLs.
+            window.open(UPDATE_URL, '_blank', 'noopener');
+            box.remove();
+        });
+    }
+
+    async function checkForUpdate() {
+        const controller = new AbortController();
+        const timer = setTimeout(function () {
+            controller.abort();
+        }, UPDATE_CHECK_TIMEOUT_MS);
+
+        try {
+            const response = await fetch(`${UPDATE_URL}?t=${Date.now()}`, {
+                cache: 'no-store',
+                signal: controller.signal
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const text = await response.text();
+            const match = text.match(/@version\s+(\d+(?:\.\d+)*)/);
+
+            if (!match) {
+                return;
+            }
+
+            const latest = match[1];
+
+            log('Update check: latest', latest, 'installed', VERSION);
+
+            if (compareVersions(latest, VERSION) > 0 && settings.dismissedUpdate !== latest) {
+                showUpdatePopup(latest);
+
+                // Optional browser notification (uncomment to enable):
+                // notify('Kapoy QC update', `Version ${latest} is available.`, `${NOTIFICATION_TAG}-update`);
+            }
+        } catch (error) {
+            log('Update check failed:', error);
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    function startUpdateChecks() {
+        // Small delay so the first check does not compete with page load.
+        setTimeout(checkForUpdate, 3000);
+        setInterval(checkForUpdate, UPDATE_CHECK_HOURS * 3600000);
+    }
+
+    // ============================================================
     // STATUS PANEL
     // ============================================================
 
@@ -2385,6 +2541,11 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                         </span>
                     </div>
                     <textarea id="q-io-text" rows="4" spellcheck="false" hidden placeholder="Paste settings JSON here, then press Import again"></textarea>
+                    <div class="q-row">
+                        <span>Updates</span>
+                        <button type="button" class="q-btn" id="q-check-update">Check now</button>
+                    </div>
+                    <div class="q-note" id="q-update-status"></div>
                     <div class="q-note">Alt+K hide / show · Alt+P pause / resume · v${VERSION}</div>
                 </div>
 
@@ -2827,6 +2988,19 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         refreshNotifStatus();
 
         $q('#q-csv').addEventListener('click', exportHistoryCsv);
+
+        // Manual update check: also shows the popup again for a skipped version.
+        $q('#q-check-update').addEventListener('click', function () {
+            const status = $q('#q-update-status');
+
+            status.textContent = 'Checking...';
+            settings.dismissedUpdate = '';
+            saveSettings();
+
+            checkForUpdate().then(function () {
+                status.textContent = $q('#q-update') ? 'A new version is available.' : `You have the latest version (v${VERSION}).`;
+            });
+        });
 
         const io = $q('#q-io-text');
 
@@ -3446,6 +3620,9 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         check('quiet hours same-day', isQuietAt(10 * 60, 9 * 60, 17 * 60) && !isQuietAt(18 * 60, 9 * 60, 17 * 60));
         check('cleanNames', cleanNames([' A  b ', 'a b', '', 'C']).join('|') === 'A b|C');
         check('countOf', countOf([1, 2]) === 2 && countOf(3) === 3 && countOf(null) === 0);
+        check('compareVersions',
+            compareVersions('3.3.6', '3.3.5') === 1 && compareVersions('3.3.5', '3.3.5') === 0 &&
+            compareVersions('3.3.5', '3.4.0') === -1 && compareVersions('3.10.0', '3.9.9') === 1);
         check('mergeSettings clamps',
             mergeSettings(defaultSettings(), { volume: 999, reloadSeconds: 1, quietFrom: 'bad' }).volume === 100 &&
             mergeSettings(defaultSettings(), { reloadSeconds: 1 }).reloadSeconds === MIN_RELOAD_SECONDS &&
@@ -3502,6 +3679,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         safe('network', setupNetworkEvents);
         safe('ticker', startTicker);
         safe('center table', setupTableCentering);
+        safe('update check', startUpdateChecks);
     });
 
 })();
