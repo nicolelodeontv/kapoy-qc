@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3.6
+// @version      3.3.7
 // @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, update popup, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -22,7 +22,7 @@
     }
 
     // Keep in sync with @version above.
-    const VERSION = '3.3.6';
+    const VERSION = '3.3.7';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -35,6 +35,7 @@
     }
 
     const CHANGELOG = [
+        'Long DA names now wrap instead of being cut off (panel slightly wider)',
         'Popup when a new version is available (Update now / Later / Skip)',
         'DA name changes now sync to your other open tabs',
         'Proofs that leave and come back alert again',
@@ -598,7 +599,7 @@ html:root body table#resultTable tbody tr.q-very-stale td[data-q-age]::after {
     position: fixed;
     top: 80px;
     right: 25px;
-    width: 290px;
+    width: 320px;
     z-index: 999999;
     background: var(--q-bg);
     color: var(--q-text);
@@ -680,9 +681,9 @@ html:root body table#resultTable tbody tr.q-very-stale td[data-q-age]::after {
 #kqc-panel .q-da > strong {
     flex: 1 1 auto;
     min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.3;
 }
 #kqc-panel .q-chips { flex: 0 0 auto; margin-left: 8px; }
 #kqc-panel .q-label,
@@ -3621,7 +3622,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         check('cleanNames', cleanNames([' A  b ', 'a b', '', 'C']).join('|') === 'A b|C');
         check('countOf', countOf([1, 2]) === 2 && countOf(3) === 3 && countOf(null) === 0);
         check('compareVersions',
-            compareVersions('3.3.6', '3.3.5') === 1 && compareVersions('3.3.5', '3.3.5') === 0 &&
+            compareVersions('3.3.7', '3.3.6') === 1 && compareVersions('3.3.5', '3.3.5') === 0 &&
             compareVersions('3.3.5', '3.4.0') === -1 && compareVersions('3.10.0', '3.9.9') === 1);
         check('mergeSettings clamps',
             mergeSettings(defaultSettings(), { volume: 999, reloadSeconds: 1, quietFrom: 'bad' }).volume === 100 &&
