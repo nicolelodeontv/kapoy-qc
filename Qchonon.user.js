@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3.4
+// @version      3.3.5
 // @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -21,7 +21,8 @@
         return;
     }
 
-    const VERSION = '3.3.4';
+    // Keep in sync with @version above.
+    const VERSION = '3.3.5';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -34,9 +35,10 @@
     }
 
     const CHANGELOG = [
-        'Sorted (green) header text is always readable',
-        'Results table is centered in the window',
-        'Assignment dropdown popup is no longer see-through'
+        'DA name changes now sync to your other open tabs',
+        'Proofs that leave and come back alert again',
+        'An empty refresh result no longer counts as "everything left"',
+        'Refresh pauses while a dropdown or field is in use'
     ];
 
     // ============================================================
@@ -114,6 +116,11 @@
 
     const USE_BACKGROUND_REFRESH = true;
     const REFRESH_TIMEOUT_MS = 20000;
+
+    // Set to true if the Assignment dropdown does NOT work on rows that
+    // appeared after a background refresh. New rows then trigger a normal
+    // page reload (the new-proof alert still fires after the reload).
+    const RELOAD_ON_NEW_ROWS = false;
 
     const SEEN_MAX_DAYS = 7;
     const HISTORY_DAYS = 30;
@@ -1605,9 +1612,23 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                     }
                 });
             } else if (event.key === SETTINGS_KEY) {
-                Object.assign(settings, loadSettings());
+                // Keep this tab's own window position / collapsed state.
+                const mine = { position: settings.position, collapsed: settings.collapsed };
+
+                Object.assign(settings, loadSettings(), mine);
+
+                // DA names may have changed in the other tab.
+                currentDAs = loadDANames();
+                allowedLower = buildAllowedMap();
+
+                if (focusDA && !currentDAs.includes(focusDA)) {
+                    focusDA = '';
+                }
+
                 applyTheme();
-                updateBadge();
+                applyTable();
+                previousIds = tableStats.ids; // a changed DA list is not "proofs left"
+                updateCount();
 
                 if ($q('#q-das')) {
                     renderDAList();
@@ -2170,10 +2191,14 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 const mine = gone.filter((id) => clickedProofs.has(id));
 
                 mine.forEach((id) => clickedProofs.delete(id));
+
+                // Forget gone proofs, so one that comes back alerts as new again.
                 gone.forEach((id) => {
                     delete firstSeen[id];
+                    delete seenProofs[id];
                 });
                 saveFirstSeen();
+                saveSeen();
 
                 if (mine.length) {
                     assigned = loadAssigned();
@@ -3070,7 +3095,26 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             Boolean($q('#resultTable tbody input[type="checkbox"]:checked'));
     }
 
+    // True while you are using a dropdown or typing in a field in the table,
+    // so a refresh does not swap the row out from under you.
+    function isUserBusy() {
+        // A select2 popup is open.
+        if ($q('.select2-drop-active, .select2-dropdown-open, .select2-container--open')) {
+            return true;
+        }
+
+        // Typing in a field inside the results table. select2's own focusser
+        // input is skipped: it stays focused after you pick something.
+        // (Focused links do not count, "assign to me" leaves its link focused.)
+        const a = document.activeElement;
+
+        return Boolean(a && a.closest && a.closest('#resultTable') &&
+            /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) &&
+            !a.classList.contains('select2-focusser'));
+    }
+
     let refreshing = false;
+    let emptyStreak = 0;
 
     function refreshFailed(error) {
         failCount++;
@@ -3137,14 +3181,36 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
                 return;
             }
 
-            // You ticked a box while the download was running: leave the rows alone.
-            if (isSelectionActive()) {
+            // An empty table right after a populated one may be a maintenance
+            // or half-loaded page. Skip it once; accept it if it repeats.
+            const liveCount = dataRows().length;
+            const freshCount = dataRows(doc).length;
+
+            if (liveCount >= 3 && freshCount === 0 && emptyStreak < 1) {
+                emptyStreak++;
+                log('Empty table skipped once');
+                setLastCheck(`Empty result ${formatTime(new Date())} - checking again`);
+                return;
+            }
+
+            emptyStreak = 0;
+
+            // You ticked a box, opened a dropdown or started typing while the
+            // download was running: leave the rows alone.
+            if (isSelectionActive() || isUserBusy()) {
                 return;
             }
 
             const merged = mergeRows(live, fresh, COLS.proof);
 
             log('Refresh ok in', Date.now() - started, 'ms, rows', merged);
+
+            // New rows were not initialised by the site's own scripts.
+            // Optional workaround: a normal reload (see RELOAD_ON_NEW_ROWS).
+            if (RELOAD_ON_NEW_ROWS && merged.added > 0) {
+                window.location.reload();
+                return;
+            }
 
             failCount = 0;
             lastSuccessAt = Date.now();
@@ -3190,6 +3256,12 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         if (isSelectionActive()) {
             resetTimer();
             show('Paused (selected)', true);
+            return;
+        }
+
+        if (isUserBusy()) {
+            resetTimer();
+            show('Paused (in use)', true);
             return;
         }
 
