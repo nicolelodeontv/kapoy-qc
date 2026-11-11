@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kapoy QC
 // @namespace    http://tampermonkey.net/
-// @version      3.3.7
+// @version      3.3.8
 // @description  Show only proofs of selected DAs, counts, background refresh with backoff, grouped notifications + beep, "assign to me" in new tab, proof age + stale tint, tab badge, gone-from-list detection, per-DA mute, quiet hours, history + CSV, dark/light theme, update popup, no jQuery
 // @match        https://mbo.minted.com/mbo/proofs*
 // @updateURL    https://raw.githubusercontent.com/nicolelodeontv/kapoy-qc/main/Qchonon.user.js
@@ -22,7 +22,7 @@
     }
 
     // Keep in sync with @version above.
-    const VERSION = '3.3.7';
+    const VERSION = '3.3.8';
 
     // Add &kqcdebug=1 to the page URL to turn on logging and the self-test
     // (run kapoyQCSelfTest() in the browser console).
@@ -35,11 +35,10 @@
     }
 
     const CHANGELOG = [
-        'Long DA names now wrap instead of being cut off (panel slightly wider)',
-        'Popup when a new version is available (Update now / Later / Skip)',
-        'DA name changes now sync to your other open tabs',
-        'Proofs that leave and come back alert again',
-        'Refresh pauses while a dropdown or field is in use'
+        'Settings > Updates > Check now now says so when it could not reach GitHub (it used to claim you were up to date)',
+        'Settings > Export no longer throws an error when the browser blocks clipboard access',
+        'Fixed the dropped-row count in the debug log and the built-in self-test',
+        'Long DA names wrap, and DA name changes sync to your other tabs (from 3.3.7)'
     ];
 
     // ============================================================
@@ -2328,6 +2327,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
         });
     }
 
+    // Resolves to 'available', 'latest' or 'error' (could not check).
     async function checkForUpdate() {
         const controller = new AbortController();
         const timer = setTimeout(function () {
@@ -2348,21 +2348,29 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             const match = text.match(/@version\s+(\d+(?:\.\d+)*)/);
 
             if (!match) {
-                return;
+                return 'error';
             }
 
             const latest = match[1];
 
             log('Update check: latest', latest, 'installed', VERSION);
 
-            if (compareVersions(latest, VERSION) > 0 && settings.dismissedUpdate !== latest) {
-                showUpdatePopup(latest);
+            if (compareVersions(latest, VERSION) > 0) {
+                if (settings.dismissedUpdate !== latest) {
+                    showUpdatePopup(latest);
 
-                // Optional browser notification (uncomment to enable):
-                // notify('Kapoy QC update', `Version ${latest} is available.`, `${NOTIFICATION_TAG}-update`);
+                    // Optional browser notification (uncomment to enable):
+                    // notify('Kapoy QC update', `Version ${latest} is available.`, `${NOTIFICATION_TAG}-update`);
+                }
+
+                return 'available';
             }
+
+            return 'latest';
         } catch (error) {
             log('Update check failed:', error);
+
+            return 'error';
         } finally {
             clearTimeout(timer);
         }
@@ -2998,8 +3006,12 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             settings.dismissedUpdate = '';
             saveSettings();
 
-            checkForUpdate().then(function () {
-                status.textContent = $q('#q-update') ? 'A new version is available.' : `You have the latest version (v${VERSION}).`;
+            checkForUpdate().then(function (result) {
+                status.textContent = result === 'available'
+                    ? 'A new version is available.'
+                    : result === 'latest'
+                        ? `You have the latest version (v${VERSION}).`
+                        : "Couldn't check for updates (offline or blocked). Try again later.";
             });
         });
 
@@ -3011,10 +3023,12 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             io.focus();
             io.select();
 
+            // The text is selected, so Ctrl+C works too when the copy is blocked.
+            // writeText() rejects asynchronously, so try/catch alone misses it.
             try {
-                navigator.clipboard.writeText(io.value);
+                navigator.clipboard.writeText(io.value).catch(function () {});
             } catch (error) {
-                // the text is selected, Ctrl+C works too
+                // clipboard API missing (e.g. non-secure page)
             }
         });
 
@@ -3233,6 +3247,7 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
     // attached to them survive) and only brings in new / changed rows.
     function mergeRows(liveBody, freshBody, col) {
         const liveMap = new Map();
+        const liveTotal = liveBody.rows.length;
         const result = { kept: 0, added: 0, dropped: 0 };
 
         Array.from(liveBody.rows).forEach((tr) => {
@@ -3259,7 +3274,9 @@ ${ui(['input[type="checkbox"]', 'input[type="radio"]'])} {
             }
         });
 
-        result.dropped = liveBody.rows.length - result.kept;
+        // Kept rows were already moved into the fragment above, so count
+        // against the total taken before the loop.
+        result.dropped = liveTotal - result.kept;
         liveBody.replaceChildren(fragment);
 
         return result;
